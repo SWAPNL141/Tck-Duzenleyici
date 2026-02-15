@@ -390,6 +390,13 @@ class IDCardProcessor:
         except: # Hata durumunda None döndür
             return None
 
+    def _is_id_card_ratio(self, aspect_ratio):
+        """TC kimlik kartı oranını kontrol et (yatay veya dikey)"""
+        # TC kimlik: 85.6mm x 53.98mm ≈ 1.586
+        # Yatay (landscape): 1.2 - 2.0
+        # Dikey (portrait):  0.5 - 0.83 (1/2.0 - 1/1.2)
+        return (1.2 < aspect_ratio < 2.0) or (0.5 < aspect_ratio < 0.83)
+
     def analyze_contours(self, contours, orig_width, orig_height):
         """Kontürleri analiz et ve en uygun kimlik kartını bul"""
         try:
@@ -400,6 +407,9 @@ class IDCardProcessor:
             min_area = (orig_width * orig_height) * min_area_ratio
             
             print(f"Minimum alan: {min_area} (görüntünün %{min_area_ratio*100:.1f}'i)")
+            
+            best_candidate = None
+            best_score = 0
             
             # En büyük 15 kontürü kontrol et
             for i, contour in enumerate(contours[:15]):
@@ -413,8 +423,8 @@ class IDCardProcessor:
                 x, y, w, h = cv2.boundingRect(contour)
                 
                 # Boyut kontrolü - çok küçük veya çok büyük olmasın
-                if not (w > orig_width * 0.2 and h > orig_height * 0.15 and
-                        w < orig_width * 0.95 and h < orig_height * 0.95):
+                if not (w > orig_width * 0.15 and h > orig_height * 0.15 and
+                        w < orig_width * 0.98 and h < orig_height * 0.98):
                     print(f"Kontür {i+1} ({w}x{h} boyut): Boyut aralığı dışında, atlanıyor.")
                     continue
 
@@ -428,11 +438,19 @@ class IDCardProcessor:
                 solidity = float(area) / hull_area if hull_area > 0 else 0
                 print(f"Solidity: {solidity:.2f}")
 
-                # TC kimlik kartı oranı kontrolü (yeniden genişletilmiş aralık: 1.3 - 2.0) ve sağlamlık kontrolü
-                # Bu aralık, barkodun dahil edilmesiyle oluşabilecek küçük sapmaları tolere eder.
-                if (1.3 < aspect_ratio < 2.0) and (solidity > 0.9):
-                    print(f"✓ Uygun kart bulundu: {w}x{h}, oran: {aspect_ratio:.2f}, sağlamlık: {solidity:.2f}")
-                    return x, y, w, h
+                # TC kimlik kartı oranı kontrolü (yatay ve dikey desteklenir) ve sağlamlık kontrolü
+                if self._is_id_card_ratio(aspect_ratio) and (solidity > 0.7):
+                    # Skor hesapla: ideal orana yakınlık + sağlamlık + alan büyüklüğü
+                    ideal_ratio = 1.586 if aspect_ratio > 1.0 else 1.0 / 1.586
+                    ratio_score = 1.0 - min(abs(aspect_ratio - ideal_ratio) / ideal_ratio, 1.0)
+                    area_score = area / (orig_width * orig_height)
+                    score = ratio_score * 0.4 + solidity * 0.4 + area_score * 0.2
+                    
+                    print(f"✓ Uygun kart adayı bulundu: {w}x{h}, oran: {aspect_ratio:.2f}, sağlamlık: {solidity:.2f}, skor: {score:.3f}")
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_candidate = (x, y, w, h)
                 else:
                     print(f"Kontür {i+1}: Oran ({aspect_ratio:.2f}) veya Sağlamlık ({solidity:.2f}) uygun değil, atlanıyor.")
                 
@@ -441,24 +459,36 @@ class IDCardProcessor:
                 approx = cv2.approxPolyDP(contour, epsilon, True)
                 
                 if len(approx) == 4:
-                    x, y, w, h = cv2.boundingRect(approx)
-                    aspect_ratio = w / h
+                    x2, y2, w2, h2 = cv2.boundingRect(approx)
+                    aspect_ratio2 = w2 / h2
                     
                     # Yaklaştırılmış kontür için sağlamlık hesapla
                     approx_hull = cv2.convexHull(approx)
                     approx_hull_area = cv2.contourArea(approx_hull)
                     approx_solidity = float(cv2.contourArea(approx)) / approx_hull_area if approx_hull_area > 0 else 0
-                    print(f"Yaklaşık 4 köşeli kontür {i+1}: {w}x{h}, oran: {aspect_ratio:.2f}, alan: {cv2.contourArea(approx):.0f}, sağlamlık: {approx_solidity:.2f}")
+                    print(f"Yaklaşık 4 köşeli kontür {i+1}: {w2}x{h2}, oran: {aspect_ratio2:.2f}, alan: {cv2.contourArea(approx):.0f}, sağlamlık: {approx_solidity:.2f}")
 
-                    if (1.3 < aspect_ratio < 2.0 and # Yine daha esnek oran
-                        w > orig_width * 0.2 and h > orig_height * 0.15 and
-                        approx_solidity > 0.9): # Sağlamlık kontrolü
-                        print(f"✓ 4 köşeli uygun kart bulundu: {w}x{h}, oran: {aspect_ratio:.2f}, sağlamlık: {approx_solidity:.2f}")
-                        return x, y, w, h
+                    if (self._is_id_card_ratio(aspect_ratio2) and
+                        w2 > orig_width * 0.15 and h2 > orig_height * 0.15 and
+                        approx_solidity > 0.7):
+                        ideal_ratio2 = 1.586 if aspect_ratio2 > 1.0 else 1.0 / 1.586
+                        ratio_score2 = 1.0 - min(abs(aspect_ratio2 - ideal_ratio2) / ideal_ratio2, 1.0)
+                        area_score2 = (w2 * h2) / (orig_width * orig_height)
+                        # 4 köşeli kontüre bonus puan ver (daha kesin tespit)
+                        score2 = ratio_score2 * 0.35 + approx_solidity * 0.35 + area_score2 * 0.2 + 0.1
+                        
+                        print(f"✓ 4 köşeli uygun kart adayı: {w2}x{h2}, oran: {aspect_ratio2:.2f}, sağlamlık: {approx_solidity:.2f}, skor: {score2:.3f}")
+                        
+                        if score2 > best_score:
+                            best_score = score2
+                            best_candidate = (x2, y2, w2, h2)
                     else:
-                        print(f"Yaklaşık 4 köşeli kontür {i+1} (yaklaşık): Oran ({aspect_ratio:.2f}) veya Sağlamlık ({approx_solidity:.2f}) uygun değil, atlanıyor.")
+                        print(f"Yaklaşık 4 köşeli kontür {i+1}: Oran ({aspect_ratio2:.2f}) veya Sağlamlık ({approx_solidity:.2f}) uygun değil, atlanıyor.")
             
-            return None
+            if best_candidate:
+                x, y, w, h = best_candidate
+                print(f"En iyi aday seçildi: {w}x{h}, skor: {best_score:.3f}")
+            return best_candidate
         except Exception as e:
             print(f"Kontür analizi hatası: {str(e)}")
             return None
@@ -490,6 +520,12 @@ class IDCardProcessor:
             # Kırp
             cropped = image[y_start:y_end, x_start:x_end]
             
+            # Eğer dikey (portrait) algılandıysa, yatay (landscape) konuma döndür
+            crop_h, crop_w = cropped.shape[:2]
+            if crop_w < crop_h:
+                print("Dikey görüntü algılandı, yatay konuma döndürülüyor...")
+                cropped = cv2.rotate(cropped, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            
             print(f"Kimlik kartı başarıyla kırpıldı:")
             print(f"   Orijinal: {image.shape[1]}x{image.shape[0]}")
             print(f"   Kırpılmış: {cropped.shape[1]}x{cropped.shape[0]}")
@@ -505,6 +541,12 @@ class IDCardProcessor:
         """Merkezi kırpma - kimlik kartı oranını koruyarak"""
         try:
             height, width = image.shape[:2]
+            
+            # Eğer dikey (portrait) ise, önce yatay konuma döndür
+            if width < height:
+                print("Merkezi kırpma: Dikey görüntü, yatay konuma döndürülüyor...")
+                image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                height, width = image.shape[:2]
             
             # TC kimlik kartı oranı: 1.586
             target_ratio = 1.586
@@ -523,8 +565,8 @@ class IDCardProcessor:
                 start_x = 0
                 start_y = (height - new_height) // 2
             
-            # %80'ini al (çok agresif kırpma yapma)
-            crop_factor = 0.8
+            # %85'ini al (daha az agresif kırpma)
+            crop_factor = 0.85
             final_width = int(new_width * crop_factor)
             final_height = int(new_height * crop_factor)
             
@@ -651,6 +693,74 @@ class IDCardProcessor:
         processing_thread = threading.Thread(target=self._run_processing)
         processing_thread.start()
 
+    def create_combined_pdf(self, image_paths):
+        """Ön ve arka yüz görüntülerini tek bir PDF dosyasına birleştirir"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pdf_filename = f"kimlik_tam_{timestamp}.pdf"
+            pdf_path = os.path.join(self.output_dir, pdf_filename)
+            
+            # Görüntüleri PIL Image olarak aç
+            pil_images = []
+            for img_path in image_paths:
+                img = Image.open(img_path)
+                # RGBA ise RGB'ye dönüştür (PDF RGBA desteklemez)
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    img = img.convert('RGB')
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+                pil_images.append(img)
+            
+            if not pil_images:
+                raise ValueError("PDF için görüntü bulunamadı")
+            
+            # A4 sayfa boyutu (piksel cinsinden, 72 DPI): 595 x 842
+            # Kimlik kartlarını A4 sayfaya yerleştir
+            a4_width, a4_height = 595, 842
+            margin = 40
+            usable_width = a4_width - 2 * margin
+            
+            # Tüm görüntüleri tek bir A4 sayfaya sığdır
+            # Her görüntüyü sayfanın genişliğine göre ölçeklendir
+            page = Image.new('RGB', (a4_width, a4_height), 'white')
+            
+            # Başlık
+            y_offset = margin
+            
+            # Her bir görüntüyü yerleştir
+            card_spacing = 20
+            available_height = a4_height - 2 * margin
+            card_height_each = (available_height - card_spacing) // len(pil_images)
+            
+            for i, img in enumerate(pil_images):
+                # Görüntüyü kullanılabilir alana sığdır
+                img_ratio = img.width / img.height
+                target_width = usable_width
+                target_height = int(target_width / img_ratio)
+                
+                # Eğer yükseklik çok fazlaysa, yüksekliğe göre ölçeklendir
+                if target_height > card_height_each:
+                    target_height = card_height_each
+                    target_width = int(target_height * img_ratio)
+                
+                resized = img.resize((target_width, target_height), Image.LANCZOS)
+                
+                # Yatay ortalama
+                x_pos = margin + (usable_width - target_width) // 2
+                page.paste(resized, (x_pos, y_offset))
+                
+                y_offset += target_height + card_spacing
+            
+            # PDF olarak kaydet
+            page.save(pdf_path, 'PDF', resolution=150)
+            
+            print(f"PDF oluşturuldu: {pdf_filename}")
+            return pdf_path
+            
+        except Exception as e:
+            print(f"PDF oluşturma hatası: {str(e)}")
+            raise Exception(f"PDF oluşturulamadı: {str(e)}")
+
     def _run_processing(self):
         try:
             self.progress_var.set(0)
@@ -665,22 +775,33 @@ class IDCardProcessor:
                 self.update_status(20, "Ön yüz işleniyor...")
                 output_path = self.process_image(self.front_image_path, "on")
                 processed_files.append(output_path)
-                self.progress_var.set(50)
+                self.progress_var.set(40)
             
             if self.back_image_path:
-                self.update_status(70, "Arka yüz işleniyor...")
+                self.update_status(50, "Arka yüz işleniyor...")
                 output_path = self.process_image(self.back_image_path, "arka")
                 processed_files.append(output_path)
-                self.progress_var.set(90)
+                self.progress_var.set(70)
+            
+            # PDF oluştur (en az 1 görüntü varsa)
+            pdf_path = None
+            if processed_files:
+                self.update_status(80, "PDF oluşturuluyor...")
+                pdf_path = self.create_combined_pdf(processed_files)
+                self.progress_var.set(95)
             
             self.update_status(100, "İşlem tamamlandı!")
             
             # Sonuçları göster
             result_message = f"İşlem başarıyla tamamlandı!\n\n"
-            result_message += f"Kaydedilen dosyalar ({len(processed_files)} adet):\n"
+            result_message += f"Kaydedilen dosyalar ({len(processed_files)} JPG + 1 PDF):\n"
             for file_path in processed_files:
                 file_size = os.path.getsize(file_path) / 1024  # KB cinsinden
-                result_message += f"• {os.path.basename(file_path)} ({file_size:.1f} KB)\n"
+                result_message += f"  {os.path.basename(file_path)} ({file_size:.1f} KB)\n"
+            if pdf_path:
+                pdf_size = os.path.getsize(pdf_path) / 1024
+                result_message += f"\nPDF (iki yüz birleşik):\n"
+                result_message += f"  {os.path.basename(pdf_path)} ({pdf_size:.1f} KB)\n"
             result_message += f"\nKlasör: {self.output_dir}"
             
             messagebox.showinfo("Başarılı", result_message)
@@ -742,12 +863,13 @@ if __name__ == "__main__":
     print("TC Kimlik Kartı Düzenleyici v1 by SWAPNIL")
     print("=" * 60)
     print("Özellikler:")
-    print("• Boy/En oranını koruyan akıllı kırpma")
-    print("• Çoklu algılama yöntemi (Canny, Adaptive, Gradient)")
-    print("• TC kimlik kartı oranı kontrolü (1.586)")
-    print("• Ayarlanabilir minimum kart boyutu")
-    print("• Merkezi yedek kırpma sistemi")
-    print("• Detaylı işlem logları")
+    print("  Boy/En oranını koruyan akıllı kırpma (yatay + dikey destek)")
+    print("  Çoklu algılama yöntemi (Canny, Adaptive, Gradient)")
+    print("  TC kimlik kartı oranı kontrolü (1.586)")
+    print("  Ayarlanabilir minimum kart boyutu")
+    print("  Merkezi yedek kırpma sistemi")
+    print("  Ön ve arka yüzü tek PDF'ye birleştirme")
+    print("  Detaylı işlem logları")
     print("=" * 60)
     
     app = IDCardProcessor()
