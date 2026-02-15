@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import cv2
 import numpy as np
@@ -11,6 +12,52 @@ import subprocess
 import platform
 from datetime import datetime
 import shutil
+
+def imread_unicode(path):
+    """Turkce karakterli dosya yollarini destekleyen goruntu okuma"""
+    try:
+        # Oncelikle cv2 ile dene
+        img = cv2.imread(path)
+        if img is not None:
+            return img
+    except Exception:
+        pass
+    # cv2 basarisisz ise numpy + PIL ile oku
+    try:
+        pil_img = Image.open(path)
+        if pil_img.mode == 'RGBA':
+            pil_img = pil_img.convert('RGB')
+        img_array = np.array(pil_img)
+        # PIL RGB, OpenCV BGR - kanal siralamasi duzelt
+        if len(img_array.shape) == 3:
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        return img_array
+    except Exception as e:
+        print(f"Goruntu okunamadi: {path} - {e}")
+        return None
+
+def imwrite_unicode(path, img):
+    """Turkce karakterli dosya yollarini destekleyen goruntu kaydetme"""
+    try:
+        # Oncelikle cv2 ile dene
+        success = cv2.imwrite(path, img)
+        if success:
+            return True
+    except Exception:
+        pass
+    # cv2 basarisiz ise PIL ile kaydet
+    try:
+        if len(img.shape) == 2:
+            pil_img = Image.fromarray(img, mode='L')
+        else:
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb)
+        pil_img.save(path)
+        return True
+    except Exception as e:
+        print(f"Goruntu kaydedilemedi: {path} - {e}")
+        return False
+
 
 class IDCardProcessor:
     def __init__(self):
@@ -144,14 +191,14 @@ class IDCardProcessor:
         margin_scale.configure(command=self.update_margin_label)
         
         ttk.Label(settings_frame, text="Min. Kart Boyutu:").grid(row=2, column=0, padx=5, sticky='w')
-        self.min_size_var = tk.DoubleVar(value=0.15)
-        size_scale = ttk.Scale(settings_frame, from_=0.05, to=0.5, variable=self.min_size_var, orient=tk.HORIZONTAL)
-        size_scale.grid(row=2, column=1, padx=5, sticky='ew') # Yatayda genişle
-        self.size_label = ttk.Label(settings_frame, text="15%")
+        self.min_size_var = tk.IntVar(value=15)
+        size_scale = ttk.Scale(settings_frame, from_=5, to=50, variable=self.min_size_var, orient=tk.HORIZONTAL)
+        size_scale.grid(row=2, column=1, padx=5, sticky='ew')
+        self.size_label = ttk.Label(settings_frame, text="%15")
         self.size_label.grid(row=2, column=2, padx=5)
         size_scale.configure(command=self.update_size_label)
         
-        ttk.Label(settings_frame, text="Iyilestirme Seviyesi:").grid(row=3, column=0, padx=5, sticky='w')
+        ttk.Label(settings_frame, text="İyileştirme Seviyesi:").grid(row=3, column=0, padx=5, sticky='w')
         self.quality_var = tk.IntVar(value=70)
         quality_scale = ttk.Scale(settings_frame, from_=10, to=100, variable=self.quality_var, orient=tk.HORIZONTAL)
         quality_scale.grid(row=3, column=1, padx=5, sticky='ew') # Yatayda genişle
@@ -200,20 +247,20 @@ class IDCardProcessor:
         btn_frame = ttk.Frame(bottom_frame)
         btn_frame.grid(row=1, column=1, sticky="e") # Butonlari saga hizala
         
-        ttk.Button(btn_frame, text="Yazdir", 
+        ttk.Button(btn_frame, text="Yazdır", 
                    command=self.print_pdf).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="Klasoru Ac", 
+        ttk.Button(btn_frame, text="Klasörü Aç", 
                    command=self.open_output_folder).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="Islemi Baslat", 
+        ttk.Button(btn_frame, text="İşlemi Başlat", 
                    command=self.start_processing).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="Cikis", 
+        ttk.Button(btn_frame, text="Çıkış", 
                    command=self.cleanup_and_exit).pack(side=tk.RIGHT, padx=5)
 
     def update_margin_label(self, value):
         self.margin_label.config(text=f"{int(float(value))}px")
     
     def update_size_label(self, value):
-        self.size_label.config(text=f"{int(float(value)*100)}%")
+        self.size_label.config(text=f"%{int(float(value))}")
     
     def update_quality_label(self, value):
         self.quality_label.config(text=f"{int(float(value))}%")
@@ -238,8 +285,16 @@ class IDCardProcessor:
             except Exception as e:
                 raise ValueError(f"Geçersiz resim dosyası: {str(e)}")
             
-            temp_path = os.path.join(self.temp_dir, f"{side}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}")
-            shutil.copy2(file_path, temp_path)
+            # Gecici dosya adinda sadece ASCII kullan (Turkce karakter sorunu onlenir)
+            safe_name = f"{side}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+            temp_path = os.path.join(self.temp_dir, safe_name)
+            try:
+                shutil.copy2(file_path, temp_path)
+            except Exception:
+                # shutil basarisiz olursa PIL ile oku/yaz
+                pil_img = Image.open(file_path)
+                pil_img.save(temp_path)
+                pil_img.close()
             
             if side == "front":
                 self.front_image_path = temp_path
@@ -408,10 +463,11 @@ class IDCardProcessor:
             # Kontürleri alan büyüklüğüne göre sırala
             contours = sorted(contours, key=cv2.contourArea, reverse=True)
             
-            min_area_ratio = self.min_size_var.get()
+            min_area_pct = self.min_size_var.get()  # 5-50 arasi tam sayi
+            min_area_ratio = min_area_pct / 100.0
             min_area = (orig_width * orig_height) * min_area_ratio
             
-            print(f"Minimum alan: {min_area} (görüntünün %{min_area_ratio*100:.1f}'i)")
+            print(f"Minimum alan: {min_area:.0f} (goruntunun %{min_area_pct}'i)")
             
             best_candidate = None
             best_score = 0
@@ -663,9 +719,10 @@ class IDCardProcessor:
             # Tam boyutta kirp (gereksiz alan kaybini onle)
             cropped = image[start_y:start_y + new_height, start_x:start_x + new_width]
             
-            print(f"Merkezi kırpma uygulandı:")
+            crop_h, crop_w = cropped.shape[:2]
+            print(f"Merkezi kirpma uygulandi:")
             print(f"   Orijinal: {width}x{height} (oran: {current_ratio:.2f})")
-            print(f"   Kırpılmış: {final_width}x{final_height} (oran: {final_width/final_height:.2f})")
+            print(f"   Kirpilmis: {crop_w}x{crop_h} (oran: {crop_w/crop_h:.2f})")
             
             return cropped
             
@@ -715,8 +772,8 @@ class IDCardProcessor:
     def process_image(self, image_path, output_suffix):
         """Goruntuleri isle ve gecici dosya olarak kaydet (PDF icin)"""
         try:
-            # Goruntuyu yukle
-            image = cv2.imread(image_path)
+            # Goruntuyu yukle (Turkce dosya yolu destegi)
+            image = imread_unicode(image_path)
             if image is None:
                 raise ValueError("Goruntu yuklenemedi")
             
@@ -758,8 +815,8 @@ class IDCardProcessor:
             
             os.makedirs(self.temp_dir, exist_ok=True)
             
-            # PNG olarak kaydet (kayipsiz, gecici dosya)
-            success = cv2.imwrite(temp_path, enhanced)
+            # PNG olarak kaydet (kayipsiz, gecici dosya - Turkce yol destegi)
+            success = imwrite_unicode(temp_path, enhanced)
             
             if not success or not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
                 raise ValueError(f"Gecici dosya olusturulamadi: {temp_path}")
@@ -952,72 +1009,30 @@ class IDCardProcessor:
         # Ancak bu genel çözüm şimdilik yeterli.
 
     def print_pdf(self):
-        """Son olusturulan PDF'yi yaziciya gonder"""
+        """Son olusturulan PDF'yi varsayilan uygulamada acar (kullanici oradan yazdirir)"""
         try:
             if not self.last_pdf_path or not os.path.exists(self.last_pdf_path):
                 messagebox.showwarning("Uyari", 
                     "Yazdirilacak PDF bulunamadi.\nOnce 'Islemi Baslat' ile kimlik isleyin.")
                 return
             
-            system = platform.system()
             pdf_path = os.path.normpath(self.last_pdf_path)
+            system = platform.system()
             
             if system == 'Windows':
-                try:
-                    # Yontem 1: Sumatra PDF ile sessiz yazdirma (yukluyse)
-                    sumatra_paths = [
-                        os.path.join(os.getenv('LOCALAPPDATA', ''), 'SumatraPDF', 'SumatraPDF.exe'),
-                        os.path.join(os.getenv('PROGRAMFILES', ''), 'SumatraPDF', 'SumatraPDF.exe'),
-                        os.path.join(os.getenv('PROGRAMFILES(X86)', ''), 'SumatraPDF', 'SumatraPDF.exe'),
-                    ]
-                    sumatra_found = None
-                    for sp in sumatra_paths:
-                        if sp and os.path.exists(sp):
-                            sumatra_found = sp
-                            break
-                    
-                    if sumatra_found:
-                        subprocess.Popen([sumatra_found, '-print-to-default', '-silent', pdf_path])
-                        print(f"SumatraPDF ile yazdirma komutu gonderildi: {pdf_path}")
-                        self.update_status(0, "PDF yaziciya gonderildi (SumatraPDF)")
-                        return
-                except Exception:
-                    pass
-                
-                try:
-                    # Yontem 2: PowerShell ile yazdirma
-                    ps_cmd = f'Start-Process -FilePath "{pdf_path}" -Verb Print'
-                    subprocess.Popen(['powershell', '-Command', ps_cmd], 
-                                   creationflags=subprocess.CREATE_NO_WINDOW)
-                    print(f"PowerShell ile yazdirma komutu gonderildi: {pdf_path}")
-                    self.update_status(0, "PDF yaziciya gonderildi")
-                    return
-                except Exception as e2:
-                    print(f"PowerShell yazdirma basarisiz: {e2}")
-                
-                try:
-                    # Yontem 3: Varsayilan uygulama ile ac (kullanici oradan yazdirir)
-                    os.startfile(pdf_path)
-                    self.update_status(0, "PDF acildi - Ctrl+P ile yazdiriniz")
-                    messagebox.showinfo("Bilgi", 
-                        "PDF dosyasi acildi.\n\nYazdirmak icin Ctrl+P tusuna basabilirsiniz.")
-                    return
-                except Exception as e3:
-                    raise Exception(f"PDF acilamadi: {e3}")
-                    
+                os.startfile(pdf_path)
             elif system == 'Darwin':
-                subprocess.run(['lpr', pdf_path], check=True)
-                print(f"Yazdirma komutu gonderildi (macOS): {pdf_path}")
+                subprocess.Popen(['open', pdf_path])
             else:
-                subprocess.run(['lpr', pdf_path], check=True)
-                print(f"Yazdirma komutu gonderildi (Linux): {pdf_path}")
+                subprocess.Popen(['xdg-open', pdf_path])
             
-            self.update_status(0, "PDF yaziciya gonderildi")
+            self.update_status(0, "PDF acildi - Ctrl+P ile yazdiriniz")
                 
         except Exception as e:
             messagebox.showerror("Yazdirma Hatasi", 
-                f"PDF yazdirilirken hata olustu:\n{str(e)}\n\n"
-                f"Alternatif: Klasoru acip PDF'yi manuel olarak yazdirabilirsiniz.")
+                f"PDF acilamadi:\n{str(e)}\n\n"
+                f"PDF dosyasi: {self.last_pdf_path}\n"
+                f"Dosyayi manuel olarak acip yazdiriniz.")
 
     def open_output_folder(self):
         """Cikti klasorunu ac"""
