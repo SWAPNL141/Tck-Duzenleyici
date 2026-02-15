@@ -62,9 +62,10 @@ def imwrite_unicode(path, img):
 class IDCardProcessor:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("TC Kimlik Kartı Düzenleyici v1 by SWAPNIL")
-        self.root.geometry("1000x750") # Başlangıç boyutu
-        self.root.resizable(False, False) # Pencere boyutunu kilitle
+        self.root.title("TC Kimlik Karti Duzenleyici")
+        self.root.geometry("1050x780")
+        self.root.minsize(900, 650)
+        self.root.resizable(True, True)
 
         # Görev çubuğu ve başlık ikonunu ayarla
         # PyInstaller ile paketlenmiş olup olmadığını kontrol et
@@ -130,11 +131,37 @@ class IDCardProcessor:
         # UI'yı kur
         self.setup_ui()
         
-        # Stil ayarları
+        # Stil ayarlari - modern gorunum
         self.style = ttk.Style()
-        self.style.configure('TButton', font=('Helvetica', 10), padding=5)
-        self.style.configure('TLabel', font=('Helvetica', 9))
-        self.style.configure('Title.TLabel', font=('Helvetica', 12, 'bold'))
+        self.style.theme_use('clam')
+        
+        # Renk paleti
+        BG = '#F5F7FA'
+        FG = '#2D3748'
+        ACCENT = '#3182CE'
+        BTN_BG = '#3182CE'
+        BTN_FG = '#FFFFFF'
+        FRAME_BG = '#EDF2F7'
+        
+        self.root.configure(bg=BG)
+        
+        self.style.configure('.', background=BG, foreground=FG, font=('Segoe UI', 9))
+        self.style.configure('TFrame', background=BG)
+        self.style.configure('TLabelframe', background=BG, foreground=FG, font=('Segoe UI', 10, 'bold'))
+        self.style.configure('TLabelframe.Label', background=BG, foreground=ACCENT, font=('Segoe UI', 10, 'bold'))
+        self.style.configure('TLabel', background=BG, foreground=FG, font=('Segoe UI', 9))
+        self.style.configure('TCheckbutton', background=BG, foreground=FG, font=('Segoe UI', 9))
+        self.style.configure('Title.TLabel', background=BG, foreground='#718096', font=('Segoe UI', 11))
+        
+        # Buton stilleri
+        self.style.configure('TButton', font=('Segoe UI', 10), padding=(12, 6))
+        self.style.configure('Accent.TButton', font=('Segoe UI', 10, 'bold'), padding=(16, 8))
+        
+        # Ilerleme cubugu
+        self.style.configure('TProgressbar', thickness=8, troughcolor=FRAME_BG, background=ACCENT)
+        
+        # Scale
+        self.style.configure('TScale', background=BG, troughcolor=FRAME_BG)
 
     def setup_ui(self):
         # Ana çerçeve - root'u dolduracak ve grid layout kullanacak
@@ -167,11 +194,25 @@ class IDCardProcessor:
         self.back_label = ttk.Label(control_frame, text="Seçili dosya: Yok")
         self.back_label.grid(row=1, column=1, padx=5, sticky='ew') # Yatayda genişle
         
-        # Kayıt yolu bilgisi
-        info_frame = ttk.LabelFrame(main_frame, text="Kayıt Bilgisi", padding="10")
-        info_frame.grid(row=1, column=0, sticky="ew", pady=5) # Grid layout kullan
-        ttk.Label(info_frame, text="Dosyalar şuraya kaydedilecek:", font=('Helvetica', 9, 'bold')).pack(anchor='w')
-        ttk.Label(info_frame, text=self.output_dir, foreground='blue').pack(anchor='w', padx=20)
+        # Kayit yolu bilgisi (tiklanabilir)
+        info_frame = ttk.LabelFrame(main_frame, text="Kayit Bilgisi", padding="10")
+        info_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        ttk.Label(info_frame, text="Dosyalar suraya kaydedilecek:", font=('Helvetica', 9, 'bold')).pack(anchor='w')
+        
+        path_row = ttk.Frame(info_frame)
+        path_row.pack(anchor='w', fill='x', padx=20, pady=(2, 0))
+        
+        self.path_label = tk.Label(path_row, text=self.output_dir, fg='#3182CE', 
+                                    cursor='hand2', font=('Segoe UI', 9, 'underline'),
+                                    bg='#F5F7FA')
+        self.path_label.pack(side='left')
+        self.path_label.bind('<Button-1>', self.copy_path_to_clipboard)
+        self.path_label.bind('<Enter>', lambda e: self.path_label.config(fg='#2B6CB0'))
+        self.path_label.bind('<Leave>', lambda e: self.path_label.config(fg='#3182CE'))
+        
+        self.clipboard_feedback_label = ttk.Label(path_row, text="", foreground='green',
+                                                    font=('Helvetica', 8))
+        self.clipboard_feedback_label.pack(side='left', padx=(10, 0))
 
         # İşlem ayarları
         settings_frame = ttk.LabelFrame(main_frame, text="İşlem Ayarları", padding="10")
@@ -190,11 +231,11 @@ class IDCardProcessor:
         self.margin_label.grid(row=1, column=2, padx=5)
         margin_scale.configure(command=self.update_margin_label)
         
-        ttk.Label(settings_frame, text="Min. Kart Boyutu:").grid(row=2, column=0, padx=5, sticky='w')
-        self.min_size_var = tk.IntVar(value=15)
-        size_scale = ttk.Scale(settings_frame, from_=5, to=50, variable=self.min_size_var, orient=tk.HORIZONTAL)
+        ttk.Label(settings_frame, text="PDF Kart Boyutu:").grid(row=2, column=0, padx=5, sticky='w')
+        self.pdf_scale_var = tk.IntVar(value=90)
+        size_scale = ttk.Scale(settings_frame, from_=30, to=100, variable=self.pdf_scale_var, orient=tk.HORIZONTAL)
         size_scale.grid(row=2, column=1, padx=5, sticky='ew')
-        self.size_label = ttk.Label(settings_frame, text="%15")
+        self.size_label = ttk.Label(settings_frame, text="%90")
         self.size_label.grid(row=2, column=2, padx=5)
         size_scale.configure(command=self.update_size_label)
         
@@ -220,17 +261,17 @@ class IDCardProcessor:
         self.front_view_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         self.front_view_frame.grid_propagate(False) # Çerçevenin içeriğine göre küçülmesini engelle
 
-        self.front_view = ttk.Label(self.front_view_frame, text="Ön Yüz Seçilmedi\n(Lütfen yukarıdan dosya seçin)", 
+        self.front_view = ttk.Label(self.front_view_frame, text="[ On Yuz ]\nDosya secilmedi", 
                                      justify=tk.CENTER, style='Title.TLabel')
-        self.front_view.pack(fill=tk.BOTH, expand=True) # Etiketi çerçevesini dolduracak şekilde pack et
+        self.front_view.pack(fill=tk.BOTH, expand=True)
 
         self.back_view_frame = ttk.Frame(img_display_frame) 
         self.back_view_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
-        self.back_view_frame.grid_propagate(False) # Çerçevenin içeriğine göre küçülmesini engelle
+        self.back_view_frame.grid_propagate(False)
 
-        self.back_view = ttk.Label(self.back_view_frame, text="Arka Yüz Seçilmedi\n(Lütfen yukarıdan dosya seçin)", 
+        self.back_view = ttk.Label(self.back_view_frame, text="[ Arka Yuz ]\nDosya secilmedi", 
                                     justify=tk.CENTER, style='Title.TLabel')
-        self.back_view.pack(fill=tk.BOTH, expand=True) # Etiketi çerçevesini dolduracak şekilde pack et
+        self.back_view.pack(fill=tk.BOTH, expand=True)
 
         # İlerleme çubuğu ve butonlar
         bottom_frame = ttk.Frame(main_frame)
@@ -245,22 +286,30 @@ class IDCardProcessor:
         self.status_label.grid(row=1, column=0, sticky="ew")
         
         btn_frame = ttk.Frame(bottom_frame)
-        btn_frame.grid(row=1, column=1, sticky="e") # Butonlari saga hizala
+        btn_frame.grid(row=1, column=1, sticky="e")
         
-        ttk.Button(btn_frame, text="Yazdır", 
-                   command=self.print_pdf).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="Klasörü Aç", 
-                   command=self.open_output_folder).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="İşlemi Başlat", 
-                   command=self.start_processing).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="Çıkış", 
-                   command=self.cleanup_and_exit).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="Cikis", 
+                   command=self.cleanup_and_exit).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text="Klasoru Ac", 
+                   command=self.open_output_folder).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text="Yazdir", 
+                   command=self.print_pdf).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text=">> Islemi Baslat <<", style='Accent.TButton',
+                   command=self.start_processing).pack(side=tk.RIGHT, padx=4)
 
     def update_margin_label(self, value):
         self.margin_label.config(text=f"{int(float(value))}px")
     
     def update_size_label(self, value):
         self.size_label.config(text=f"%{int(float(value))}")
+    
+    def copy_path_to_clipboard(self, event=None):
+        """Kayit konumunu panoya kopyala ve geri bildirim goster"""
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.output_dir)
+        self.clipboard_feedback_label.config(text="Panoya kopyalandi!", foreground='green')
+        # 2 saniye sonra geri bildirimi kaldir
+        self.root.after(2000, lambda: self.clipboard_feedback_label.config(text=""))
     
     def update_quality_label(self, value):
         self.quality_label.config(text=f"{int(float(value))}%")
@@ -463,11 +512,10 @@ class IDCardProcessor:
             # Kontürleri alan büyüklüğüne göre sırala
             contours = sorted(contours, key=cv2.contourArea, reverse=True)
             
-            min_area_pct = self.min_size_var.get()  # 5-50 arasi tam sayi
-            min_area_ratio = min_area_pct / 100.0
+            min_area_ratio = 0.10  # Goruntunun en az %10'u buyuklugunde olmali
             min_area = (orig_width * orig_height) * min_area_ratio
             
-            print(f"Minimum alan: {min_area:.0f} (goruntunun %{min_area_pct}'i)")
+            print(f"Minimum alan: {min_area:.0f} (goruntunun %{int(min_area_ratio*100)}'i)")
             
             best_candidate = None
             best_score = 0
@@ -868,12 +916,18 @@ class IDCardProcessor:
             if not pil_images:
                 raise ValueError("PDF icin goruntu bulunamadi")
             
+            # Kullanicinin sectigi PDF kart boyutu (sayfa genisliginin yuzdesi)
+            pdf_scale_pct = self.pdf_scale_var.get()  # 30-100 arasi
+            print(f"PDF kart boyutu: %{pdf_scale_pct}")
+            
             # A4 sayfa boyutu (piksel cinsinden, 150 DPI): 1240 x 1754
             dpi = 150
             a4_width = int(8.27 * dpi)   # 1240 px
             a4_height = int(11.69 * dpi)  # 1754 px
             margin = int(0.5 * dpi)       # 75 px (1.27 cm)
-            usable_width = a4_width - 2 * margin
+            full_usable_width = a4_width - 2 * margin
+            # Kullanici ayarina gore kullanilabilir genisligi daralt
+            usable_width = int(full_usable_width * pdf_scale_pct / 100.0)
             
             # A4 sayfa olustur
             page = Image.new('RGB', (a4_width, a4_height), (255, 255, 255))
@@ -898,8 +952,8 @@ class IDCardProcessor:
                 
                 resized = img.resize((target_width, target_height), Image.LANCZOS)
                 
-                # Yatay ortalama
-                x_pos = margin + (usable_width - target_width) // 2
+                # Yatay ortalama (tam sayfa genisligine gore ortala)
+                x_pos = margin + (full_usable_width - target_width) // 2
                 page.paste(resized, (x_pos, y_offset))
                 
                 print(f"  Goruntu {i+1} yerlesti: {target_width}x{target_height} @ ({x_pos}, {y_offset})")
@@ -969,10 +1023,15 @@ class IDCardProcessor:
             if pdf_path:
                 pdf_size = os.path.getsize(pdf_path) / 1024
                 yuz_sayisi = len(temp_files)
-                result_message = f"Islem basariyla tamamlandi!\n\n"
-                result_message += f"PDF dosyasi ({yuz_sayisi} yuz birlesik):\n"
-                result_message += f"  {os.path.basename(pdf_path)} ({pdf_size:.1f} KB)\n"
-                result_message += f"\nKlasor: {self.output_dir}"
+                yuz_text = "on + arka yuz" if yuz_sayisi == 2 else "tek yuz"
+                result_message = (
+                    f"Islem basariyla tamamlandi!\n\n"
+                    f"PDF: {os.path.basename(pdf_path)}\n"
+                    f"Boyut: {pdf_size:.1f} KB ({yuz_text})\n"
+                    f"Kart olcegi: %{self.pdf_scale_var.get()}\n\n"
+                    f"Kayit konumunu kopyalamak icin\n"
+                    f"'Kayit Bilgisi' alanindaki yola tiklayin."
+                )
                 
                 messagebox.showinfo("Basarili", result_message)
             
@@ -1063,16 +1122,15 @@ class IDCardProcessor:
         self.root.mainloop()
 
 if __name__ == "__main__":
-    print("TC Kimlik Kartı Düzenleyici v1 by SWAPNIL")
+    print("TC Kimlik Karti Duzenleyici v2 by SWAPNIL")
     print("=" * 60)
-    print("Özellikler:")
-    print("  Boy/En oranını koruyan akıllı kırpma (yatay + dikey destek)")
-    print("  Çoklu algılama yöntemi (Canny, Adaptive, Gradient)")
-    print("  TC kimlik kartı oranı kontrolü (1.586)")
-    print("  Ayarlanabilir minimum kart boyutu")
-    print("  Merkezi yedek kırpma sistemi")
-    print("  Ön ve arka yüzü tek PDF'ye birleştirme")
-    print("  Detaylı işlem logları")
+    print("Ozellikler:")
+    print("  Akilli kimlik karti kirpma (yatay + dikey + perspektif)")
+    print("  Coklu algilama (Canny, Adaptive, Gradient)")
+    print("  Siyah-beyaz donusum + iyilestirme")
+    print("  PDF cikti (ayarlanabilir kart boyutu)")
+    print("  Turkce dosya yolu destegi")
+    print("  Tek tikla yazdirma")
     print("=" * 60)
     
     app = IDCardProcessor()
