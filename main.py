@@ -4,8 +4,8 @@ import cv2
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from PIL import Image, ImageTk, ImageOps
-import PIL.PdfImagePlugin  # PyInstaller icin PDF eklentisini acikca yukle
+from PIL import Image, ImageTk, ImageOps, ImageDraw, ImageFont
+import PIL.PdfImagePlugin
 import threading
 import sys
 import subprocess
@@ -13,45 +13,42 @@ import platform
 from datetime import datetime
 import shutil
 
+
+# ---------------------------------------------------------------------------
+# Turkce dosya yolu destegi icin yardimci fonksiyonlar
+# ---------------------------------------------------------------------------
 def imread_unicode(path):
-    """Turkce karakterli dosya yollarini destekleyen goruntu okuma"""
     try:
-        # Oncelikle cv2 ile dene
         img = cv2.imread(path)
         if img is not None:
             return img
     except Exception:
         pass
-    # cv2 basarisisz ise numpy + PIL ile oku
     try:
         pil_img = Image.open(path)
         if pil_img.mode == 'RGBA':
             pil_img = pil_img.convert('RGB')
-        img_array = np.array(pil_img)
-        # PIL RGB, OpenCV BGR - kanal siralamasi duzelt
-        if len(img_array.shape) == 3:
-            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        return img_array
+        arr = np.array(pil_img)
+        if len(arr.shape) == 3:
+            arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        return arr
     except Exception as e:
         print(f"Goruntu okunamadi: {path} - {e}")
         return None
 
+
 def imwrite_unicode(path, img):
-    """Turkce karakterli dosya yollarini destekleyen goruntu kaydetme"""
     try:
-        # Oncelikle cv2 ile dene
-        success = cv2.imwrite(path, img)
-        if success:
+        ok = cv2.imwrite(path, img)
+        if ok:
             return True
     except Exception:
         pass
-    # cv2 basarisiz ise PIL ile kaydet
     try:
         if len(img.shape) == 2:
             pil_img = Image.fromarray(img, mode='L')
         else:
-            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(rgb)
+            pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         pil_img.save(path)
         return True
     except Exception as e:
@@ -59,1079 +56,813 @@ def imwrite_unicode(path, img):
         return False
 
 
+# ---------------------------------------------------------------------------
+# Renk paleti
+# ---------------------------------------------------------------------------
+C_BG        = '#1A1A2E'      # Ana arka plan
+C_SURFACE   = '#16213E'      # Kart/panel arka plani
+C_SURFACE2  = '#0F3460'      # Vurgulu panel
+C_ACCENT    = '#E94560'      # Ana vurgu (kirmizi-pembe)
+C_ACCENT2   = '#533483'      # Ikincil vurgu (mor)
+C_TEXT      = '#EAEAEA'       # Ana metin
+C_TEXT_DIM  = '#8892B0'       # Soluk metin
+C_SUCCESS   = '#00D68F'       # Basari yesili
+C_BORDER    = '#2A2A4A'       # Cerceve kenarligi
+
+
 class IDCardProcessor:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("TC Kimlik Karti Duzenleyici")
-        self.root.geometry("1050x780")
-        self.root.minsize(900, 650)
-        self.root.resizable(True, True)
+        self.root.title('TC Kimlik Kart\u0131 D\u00fczenleyici')
+        self.root.geometry('1080x820')
+        self.root.minsize(960, 720)
+        self.root.configure(bg=C_BG)
 
-        # Görev çubuğu ve başlık ikonunu ayarla
-        # PyInstaller ile paketlenmiş olup olmadığını kontrol et
+        # ---- ikon ----
         if getattr(sys, 'frozen', False):
-            # PyInstaller ile paketlenmişse, geçici dizini kullan
             base_path = sys._MEIPASS
         else:
-            # Normal Python betiği olarak çalışıyorsa, mevcut dizini kullan
-            base_path = os.path.abspath(".")
+            base_path = os.path.abspath('.')
+        for ico in ('app_icon.png', 'app.ico'):
+            p = os.path.join(base_path, ico)
+            if os.path.exists(p):
+                try:
+                    if ico.endswith('.png'):
+                        ph = ImageTk.PhotoImage(Image.open(p).resize((64, 64), Image.LANCZOS))
+                        self.root.iconphoto(True, ph)
+                    else:
+                        self.root.iconbitmap(p)
+                    break
+                except Exception:
+                    pass
 
-        icon_loaded = False
-        # Önce .png ikonunu dene (daha esnek ve çapraz platform uyumlu)
-        png_icon_name = 'app_icon.png' # PNG ikon dosyanızın adı
-        png_icon_path = os.path.join(base_path, png_icon_name)
-        try:
-            if os.path.exists(png_icon_path):
-                img = Image.open(png_icon_path)
-                # İkon boyutunu ayarlayın (örneğin 64x64 veya 128x128)
-                # İkonlar genellikle küçük boyutlarda daha iyi görünür.
-                img = img.resize((64, 64), Image.LANCZOS) 
-                photo = ImageTk.PhotoImage(img)
-                # iconphoto(True, photo) tüm üst düzey pencereler için ikonu ayarlar
-                self.root.iconphoto(True, photo) 
-                icon_loaded = True
-                print(f"Bilgi: '{png_icon_name}' ikonu başarıyla yüklendi.")
-            else:
-                print(f"Uyarı: '{png_icon_name}' dosyası bulunamadı.")
-        except Exception as e:
-            print(f"Hata: PNG ikon yüklenirken bir sorun oluştu: {e}.")
-
-        # Eğer PNG ikonu yüklenemezse, .ico ikonunu dene (Windows için)
-        if not icon_loaded:
-            ico_icon_name = 'app.ico' # ICO ikon dosyanızın adı
-            ico_icon_path = os.path.join(base_path, ico_icon_name)
-            try:
-                if os.path.exists(ico_icon_path):
-                    self.root.iconbitmap(ico_icon_path) 
-                    icon_loaded = True
-                    print(f"Bilgi: '{ico_icon_name}' ikonu başarıyla yüklendi.")
-                else:
-                    print(f"Uyarı: '{ico_icon_name}' dosyası bulunamadı.")
-            except tk.TclError as e:
-                print(f"Hata: ICO ikon yüklenirken bir sorun oluştu: {e}.")
-        
-        if not icon_loaded:
-            print("Uyarı: Hiçbir özel ikon yüklenemedi. Varsayılan ikon kullanılacak.")
-
-
-        # Değişkenleri başlat
-        self.temp_dir = os.path.join(os.getenv("TEMP"), "kimlik_islemleri")
-        self.front_image_path = ""
-        self.back_image_path = ""
-        self.last_pdf_path = ""
-        
-        # Belgeler klasörüne sabit kayıt yolu
-        documents_path = os.path.join(os.path.expanduser("~"), "Documents")
-        self.output_dir = os.path.join(documents_path, "TC_Kimlik_Islemleri")
-        
-        # Klasörleri oluştur
+        # ---- degiskenler ----
+        self.temp_dir = os.path.join(os.getenv('TEMP', '/tmp'), 'kimlik_islemleri')
+        self.front_image_path = ''
+        self.back_image_path = ''
+        self.last_pdf_path = ''
+        docs = os.path.join(os.path.expanduser('~'), 'Documents')
+        self.output_dir = os.path.join(docs, 'TC_Kimlik_Islemleri')
         os.makedirs(self.temp_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
-        
-        # UI'yı kur
-        self.setup_ui()
-        
-        # Stil ayarlari - modern gorunum
+
+        self._setup_styles()
+        self._build_ui()
+
+    # ------------------------------------------------------------------
+    # STILLER
+    # ------------------------------------------------------------------
+    def _setup_styles(self):
         self.style = ttk.Style()
         self.style.theme_use('clam')
-        
-        # Renk paleti
-        BG = '#F5F7FA'
-        FG = '#2D3748'
-        ACCENT = '#3182CE'
-        BTN_BG = '#3182CE'
-        BTN_FG = '#FFFFFF'
-        FRAME_BG = '#EDF2F7'
-        
-        self.root.configure(bg=BG)
-        
-        self.style.configure('.', background=BG, foreground=FG, font=('Segoe UI', 9))
-        self.style.configure('TFrame', background=BG)
-        self.style.configure('TLabelframe', background=BG, foreground=FG, font=('Segoe UI', 10, 'bold'))
-        self.style.configure('TLabelframe.Label', background=BG, foreground=ACCENT, font=('Segoe UI', 10, 'bold'))
-        self.style.configure('TLabel', background=BG, foreground=FG, font=('Segoe UI', 9))
-        self.style.configure('TCheckbutton', background=BG, foreground=FG, font=('Segoe UI', 9))
-        self.style.configure('Title.TLabel', background=BG, foreground='#718096', font=('Segoe UI', 11))
-        
-        # Buton stilleri
-        self.style.configure('TButton', font=('Segoe UI', 10), padding=(12, 6))
-        self.style.configure('Accent.TButton', font=('Segoe UI', 10, 'bold'), padding=(16, 8))
-        
-        # Ilerleme cubugu
-        self.style.configure('TProgressbar', thickness=8, troughcolor=FRAME_BG, background=ACCENT)
-        
+
+        self.style.configure('.', background=C_BG, foreground=C_TEXT,
+                             font=('Segoe UI', 10))
+        self.style.configure('TFrame', background=C_BG)
+        self.style.configure('Surface.TFrame', background=C_SURFACE)
+
+        # LabelFrame
+        self.style.configure('TLabelframe', background=C_SURFACE, borderwidth=2,
+                             relief='groove')
+        self.style.configure('TLabelframe.Label', background=C_SURFACE,
+                             foreground=C_ACCENT, font=('Segoe UI', 10, 'bold'))
+
+        # Label
+        self.style.configure('TLabel', background=C_BG, foreground=C_TEXT,
+                             font=('Segoe UI', 10))
+        self.style.configure('Dim.TLabel', background=C_BG, foreground=C_TEXT_DIM,
+                             font=('Segoe UI', 9))
+        self.style.configure('SurfaceLabel.TLabel', background=C_SURFACE,
+                             foreground=C_TEXT, font=('Segoe UI', 10))
+        self.style.configure('Title.TLabel', background=C_SURFACE,
+                             foreground=C_TEXT_DIM, font=('Segoe UI', 12))
+        self.style.configure('Header.TLabel', background=C_BG,
+                             foreground=C_TEXT, font=('Segoe UI', 18, 'bold'))
+        self.style.configure('Success.TLabel', background=C_BG,
+                             foreground=C_SUCCESS, font=('Segoe UI', 9))
+
+        # Checkbutton
+        self.style.configure('TCheckbutton', background=C_SURFACE,
+                             foreground=C_TEXT, font=('Segoe UI', 10))
+
+        # Button
+        self.style.configure('TButton', background=C_SURFACE2,
+                             foreground=C_TEXT, font=('Segoe UI', 10),
+                             padding=(14, 7), borderwidth=0)
+        self.style.map('TButton',
+                        background=[('active', C_ACCENT2), ('disabled', C_BORDER)])
+
+        self.style.configure('Accent.TButton', background=C_ACCENT,
+                             foreground='#FFFFFF', font=('Segoe UI', 11, 'bold'),
+                             padding=(20, 10), borderwidth=0)
+        self.style.map('Accent.TButton',
+                        background=[('active', '#C73E54'), ('disabled', C_BORDER)])
+
+        # Progressbar
+        self.style.configure('TProgressbar', thickness=6,
+                             troughcolor=C_SURFACE, background=C_ACCENT)
+
         # Scale
-        self.style.configure('TScale', background=BG, troughcolor=FRAME_BG)
+        self.style.configure('TScale', background=C_SURFACE,
+                             troughcolor=C_SURFACE2)
 
-    def setup_ui(self):
-        # Ana çerçeve - root'u dolduracak ve grid layout kullanacak
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky="nsew") # main_frame, root penceresini doldurur
-        self.root.grid_rowconfigure(0, weight=1) # root'un 0. satırının genişlemesine izin ver
-        self.root.grid_columnconfigure(0, weight=1) # root'un 0. sütununun genişlemesine izin ver
+    # ------------------------------------------------------------------
+    # ARAYUZ
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        root = self.root
+        root.grid_rowconfigure(0, weight=1)
+        root.grid_columnconfigure(0, weight=1)
 
-        # main_frame içindeki satırların konfigürasyonu
-        # Row 0: control_frame (sabit yükseklik)
-        # Row 1: info_frame (sabit yükseklik)
-        # Row 2: settings_frame (sabit yükseklik)
-        # Row 3: img_display_frame (dikey olarak genişler)
-        # Row 4: bottom_frame (sabit yükseklik)
-        main_frame.grid_rowconfigure(3, weight=1) # img_display_frame'in bulunduğu satır genişleyecek
-        main_frame.grid_columnconfigure(0, weight=1) # main_frame'in tek sütunu genişleyecek
+        outer = ttk.Frame(root, padding=16)
+        outer.grid(row=0, column=0, sticky='nsew')
+        outer.grid_columnconfigure(0, weight=1)
+        # satirlar: 0=header  1=dosya  2=kayit  3=ayarlar  4=onizleme(genisler) 5=alt
+        outer.grid_rowconfigure(4, weight=1)
 
-        # Kontrol paneli
-        control_frame = ttk.LabelFrame(main_frame, text="Dosya Seçimleri", padding="10")
-        control_frame.grid(row=0, column=0, sticky="ew", pady=5) # Grid layout kullan
-        control_frame.grid_columnconfigure(1, weight=1) # Dosya yolu etiketinin genişlemesine izin ver
+        # ---- BASLIK ----
+        hdr = ttk.Frame(outer)
+        hdr.grid(row=0, column=0, sticky='ew', pady=(0, 10))
+        ttk.Label(hdr, text='TC Kimlik Kart\u0131 D\u00fczenleyici',
+                  style='Header.TLabel').pack(side='left')
+        ttk.Label(hdr, text='v2  \u2022  by SWAPNIL', style='Dim.TLabel').pack(
+            side='left', padx=(10, 0), pady=(8, 0))
 
-        ttk.Button(control_frame, text="Ön Yüz Seç", 
-                   command=lambda: self.select_image("front")).grid(row=0, column=0, padx=5, pady=5, sticky='w')
-        self.front_label = ttk.Label(control_frame, text="Seçili dosya: Yok")
-        self.front_label.grid(row=0, column=1, padx=5, sticky='ew') # Yatayda genişle
+        # ---- DOSYA SECIMI ----
+        fsel = ttk.LabelFrame(outer, text=' Dosya Se\u00e7imi ', padding=12)
+        fsel.grid(row=1, column=0, sticky='ew', pady=4)
+        fsel.grid_columnconfigure(1, weight=1)
 
-        ttk.Button(control_frame, text="Arka Yüz Seç", 
-                   command=lambda: self.select_image("back")).grid(row=1, column=0, padx=5, pady=5, sticky='w')
-        self.back_label = ttk.Label(control_frame, text="Seçili dosya: Yok")
-        self.back_label.grid(row=1, column=1, padx=5, sticky='ew') # Yatayda genişle
-        
-        # Kayit yolu bilgisi (tiklanabilir)
-        info_frame = ttk.LabelFrame(main_frame, text="Kayit Bilgisi", padding="10")
-        info_frame.grid(row=1, column=0, sticky="ew", pady=5)
-        ttk.Label(info_frame, text="Dosyalar suraya kaydedilecek:", font=('Helvetica', 9, 'bold')).pack(anchor='w')
-        
-        path_row = ttk.Frame(info_frame)
-        path_row.pack(anchor='w', fill='x', padx=20, pady=(2, 0))
-        
-        self.path_label = tk.Label(path_row, text=self.output_dir, fg='#3182CE', 
-                                    cursor='hand2', font=('Segoe UI', 9, 'underline'),
-                                    bg='#F5F7FA')
+        ttk.Button(fsel, text='\u00d6n Y\u00fcz Se\u00e7',
+                   command=lambda: self.select_image('front')).grid(
+            row=0, column=0, padx=(0, 8), pady=3, sticky='w')
+        self.front_label = ttk.Label(fsel, text='Se\u00e7ili dosya yok',
+                                     style='SurfaceLabel.TLabel')
+        self.front_label.grid(row=0, column=1, sticky='ew')
+
+        ttk.Button(fsel, text='Arka Y\u00fcz Se\u00e7',
+                   command=lambda: self.select_image('back')).grid(
+            row=1, column=0, padx=(0, 8), pady=3, sticky='w')
+        self.back_label = ttk.Label(fsel, text='Se\u00e7ili dosya yok',
+                                    style='SurfaceLabel.TLabel')
+        self.back_label.grid(row=1, column=1, sticky='ew')
+
+        # ---- KAYIT BILGISI ----
+        info = ttk.LabelFrame(outer, text=' Kay\u0131t Bilgisi ', padding=12)
+        info.grid(row=2, column=0, sticky='ew', pady=4)
+
+        ttk.Label(info, text='Dosyalar \u015furaya kaydedilecek:',
+                  style='SurfaceLabel.TLabel').pack(anchor='w')
+
+        prow = ttk.Frame(info)
+        prow.configure(style='Surface.TFrame')
+        prow.pack(anchor='w', fill='x', padx=(16, 0), pady=(4, 0))
+
+        self.path_label = tk.Label(prow, text=self.output_dir,
+                                    fg=C_ACCENT, bg=C_SURFACE, cursor='hand2',
+                                    font=('Segoe UI', 9, 'underline'))
         self.path_label.pack(side='left')
-        self.path_label.bind('<Button-1>', self.copy_path_to_clipboard)
-        self.path_label.bind('<Enter>', lambda e: self.path_label.config(fg='#2B6CB0'))
-        self.path_label.bind('<Leave>', lambda e: self.path_label.config(fg='#3182CE'))
-        
-        self.clipboard_feedback_label = ttk.Label(path_row, text="", foreground='green',
-                                                    font=('Helvetica', 8))
-        self.clipboard_feedback_label.pack(side='left', padx=(10, 0))
+        self.path_label.bind('<Button-1>', self._copy_path)
+        self.path_label.bind('<Enter>', lambda e: self.path_label.config(fg='#FF6B81'))
+        self.path_label.bind('<Leave>', lambda e: self.path_label.config(fg=C_ACCENT))
 
-        # İşlem ayarları
-        settings_frame = ttk.LabelFrame(main_frame, text="İşlem Ayarları", padding="10")
-        settings_frame.grid(row=2, column=0, sticky="ew", pady=5) # Grid layout kullan
-        settings_frame.grid_columnconfigure(1, weight=1) # Scale sütununun genişlemesine izin ver
-        
+        self.clip_lbl = ttk.Label(prow, text='', style='Success.TLabel')
+        self.clip_lbl.configure(background=C_SURFACE)
+        self.clip_lbl.pack(side='left', padx=(12, 0))
+
+        # ---- AYARLAR ----
+        sett = ttk.LabelFrame(outer, text=' \u0130\u015flem Ayarlar\u0131 ', padding=12)
+        sett.grid(row=3, column=0, sticky='ew', pady=4)
+        sett.grid_columnconfigure(1, weight=1)
+
         self.auto_crop_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(settings_frame, text="Akıllı TC Kimlik Kırpma (Boy/En oranı korunur)", 
-                        variable=self.auto_crop_var).grid(row=0, column=0, sticky='w', padx=5, columnspan=3)
-        
-        ttk.Label(settings_frame, text="Kenar Boşluğu:").grid(row=1, column=0, padx=5, sticky='w')
-        self.margin_var = tk.IntVar(value=10) # Varsayılan kenar boşluğunu 10px'e geri çektim
-        margin_scale = ttk.Scale(settings_frame, from_=0, to=50, variable=self.margin_var, orient=tk.HORIZONTAL)
-        margin_scale.grid(row=1, column=1, padx=5, sticky='ew') # Yatayda genişle
-        self.margin_label = ttk.Label(settings_frame, text="10px") # Etiket değerini de güncelle
-        self.margin_label.grid(row=1, column=2, padx=5)
-        margin_scale.configure(command=self.update_margin_label)
-        
-        ttk.Label(settings_frame, text="PDF Kart Boyutu:").grid(row=2, column=0, padx=5, sticky='w')
+        ttk.Checkbutton(sett, text='Ak\u0131ll\u0131 Kimlik Alg\u0131lama ve K\u0131rpma',
+                        variable=self.auto_crop_var).grid(
+            row=0, column=0, columnspan=3, sticky='w', padx=4, pady=2)
+
+        # Kenar boslugu
+        ttk.Label(sett, text='Kenar Bo\u015flu\u011fu:', style='SurfaceLabel.TLabel').grid(
+            row=1, column=0, padx=4, sticky='w')
+        self.margin_var = tk.IntVar(value=10)
+        ms = ttk.Scale(sett, from_=0, to=50, variable=self.margin_var,
+                       orient=tk.HORIZONTAL)
+        ms.grid(row=1, column=1, padx=4, sticky='ew')
+        self.margin_lbl = ttk.Label(sett, text='10 px', width=7,
+                                    style='SurfaceLabel.TLabel')
+        self.margin_lbl.grid(row=1, column=2, padx=4)
+        ms.configure(command=lambda v: self.margin_lbl.config(
+            text=f'{int(float(v))} px'))
+
+        # PDF kart boyutu
+        ttk.Label(sett, text='PDF Kart Boyutu:', style='SurfaceLabel.TLabel').grid(
+            row=2, column=0, padx=4, sticky='w')
         self.pdf_scale_var = tk.IntVar(value=90)
-        size_scale = ttk.Scale(settings_frame, from_=30, to=100, variable=self.pdf_scale_var, orient=tk.HORIZONTAL)
-        size_scale.grid(row=2, column=1, padx=5, sticky='ew')
-        self.size_label = ttk.Label(settings_frame, text="%90")
-        self.size_label.grid(row=2, column=2, padx=5)
-        size_scale.configure(command=self.update_size_label)
-        
-        ttk.Label(settings_frame, text="İyileştirme Seviyesi:").grid(row=3, column=0, padx=5, sticky='w')
+        ps = ttk.Scale(sett, from_=30, to=100, variable=self.pdf_scale_var,
+                       orient=tk.HORIZONTAL)
+        ps.grid(row=2, column=1, padx=4, sticky='ew')
+        self.size_lbl = ttk.Label(sett, text='%90', width=7,
+                                  style='SurfaceLabel.TLabel')
+        self.size_lbl.grid(row=2, column=2, padx=4)
+        ps.configure(command=lambda v: self.size_lbl.config(
+            text=f'%{int(float(v))}'))
+
+        # Iyilestirme seviyesi
+        ttk.Label(sett, text='\u0130yile\u015ftirme:', style='SurfaceLabel.TLabel').grid(
+            row=3, column=0, padx=4, sticky='w')
         self.quality_var = tk.IntVar(value=70)
-        quality_scale = ttk.Scale(settings_frame, from_=10, to=100, variable=self.quality_var, orient=tk.HORIZONTAL)
-        quality_scale.grid(row=3, column=1, padx=5, sticky='ew') # Yatayda genişle
-        self.quality_label = ttk.Label(settings_frame, text="70%")
-        self.quality_label.grid(row=3, column=2, padx=5)
-        quality_scale.configure(command=self.update_quality_label)
+        qs = ttk.Scale(sett, from_=10, to=100, variable=self.quality_var,
+                       orient=tk.HORIZONTAL)
+        qs.grid(row=3, column=1, padx=4, sticky='ew')
+        self.qual_lbl = ttk.Label(sett, text='%70', width=7,
+                                  style='SurfaceLabel.TLabel')
+        self.qual_lbl.grid(row=3, column=2, padx=4)
+        qs.configure(command=lambda v: self.qual_lbl.config(
+            text=f'%{int(float(v))}'))
 
-        # Görüntü görüntüleme alanı
-        img_display_frame = ttk.LabelFrame(main_frame, text="Görüntü Önizleme", padding="10")
-        img_display_frame.grid(row=3, column=0, sticky="nsew", pady=5) # Grid layout kullan, genişlemesine izin ver
-        img_display_frame.grid_columnconfigure(0, weight=1) # Önizleme etiketi sütununun genişlemesine izin ver
-        img_display_frame.grid_columnconfigure(1, weight=1) # Arka yüz etiketi sütununun genişlemesine izin ver
-        img_display_frame.grid_rowconfigure(0, weight=1) # Etiketlerin dikey olarak genişlemesine izin ver
+        # ---- ONIZLEME ----
+        prev = ttk.LabelFrame(outer, text=' \u00d6nizleme ', padding=10)
+        prev.grid(row=4, column=0, sticky='nsew', pady=4)
+        prev.grid_columnconfigure(0, weight=1)
+        prev.grid_columnconfigure(1, weight=1)
+        prev.grid_rowconfigure(0, weight=1)
 
-        # Ön ve arka yüz görüntüleri için sabit boyutlu çerçeveler
-        # Bu çerçeveler, içlerindeki Label'ın boyutunu kontrol eder.
-        # Önizleme çerçevesinin boyutunu daha dinamik hale getirdim.
-        self.front_view_frame = ttk.Frame(img_display_frame) 
-        self.front_view_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        self.front_view_frame.grid_propagate(False) # Çerçevenin içeriğine göre küçülmesini engelle
-
-        self.front_view = ttk.Label(self.front_view_frame, text="[ On Yuz ]\nDosya secilmedi", 
+        self.front_frame = ttk.Frame(prev, style='Surface.TFrame')
+        self.front_frame.grid(row=0, column=0, sticky='nsew', padx=4, pady=4)
+        self.front_frame.grid_propagate(False)
+        self.front_view = ttk.Label(self.front_frame,
+                                     text='\u00d6n Y\u00fcz\nDosya se\u00e7ilmedi',
                                      justify=tk.CENTER, style='Title.TLabel')
-        self.front_view.pack(fill=tk.BOTH, expand=True)
+        self.front_view.pack(fill='both', expand=True)
 
-        self.back_view_frame = ttk.Frame(img_display_frame) 
-        self.back_view_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
-        self.back_view_frame.grid_propagate(False)
-
-        self.back_view = ttk.Label(self.back_view_frame, text="[ Arka Yuz ]\nDosya secilmedi", 
+        self.back_frame = ttk.Frame(prev, style='Surface.TFrame')
+        self.back_frame.grid(row=0, column=1, sticky='nsew', padx=4, pady=4)
+        self.back_frame.grid_propagate(False)
+        self.back_view = ttk.Label(self.back_frame,
+                                    text='Arka Y\u00fcz\nDosya se\u00e7ilmedi',
                                     justify=tk.CENTER, style='Title.TLabel')
-        self.back_view.pack(fill=tk.BOTH, expand=True)
+        self.back_view.pack(fill='both', expand=True)
 
-        # İlerleme çubuğu ve butonlar
-        bottom_frame = ttk.Frame(main_frame)
-        bottom_frame.grid(row=4, column=0, sticky="ew", pady=10) # Grid layout kullan
-        bottom_frame.grid_columnconfigure(0, weight=1) # İlerleme çubuğu sütununun genişlemesine izin ver
-        
+        # ---- ALT BAR ----
+        bot = ttk.Frame(outer)
+        bot.grid(row=5, column=0, sticky='ew', pady=(8, 0))
+        bot.grid_columnconfigure(0, weight=1)
+
         self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(bottom_frame, variable=self.progress_var, maximum=100)
-        self.progress_bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=5) # İki sütuna yayıl
-        
-        self.status_label = ttk.Label(bottom_frame, text="Hazır", anchor=tk.W)
-        self.status_label.grid(row=1, column=0, sticky="ew")
-        
-        btn_frame = ttk.Frame(bottom_frame)
-        btn_frame.grid(row=1, column=1, sticky="e")
-        
-        ttk.Button(btn_frame, text="Cikis", 
-                   command=self.cleanup_and_exit).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btn_frame, text="Klasoru Ac", 
-                   command=self.open_output_folder).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btn_frame, text="Yazdir", 
-                   command=self.print_pdf).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btn_frame, text=">> Islemi Baslat <<", style='Accent.TButton',
-                   command=self.start_processing).pack(side=tk.RIGHT, padx=4)
+        ttk.Progressbar(bot, variable=self.progress_var, maximum=100).grid(
+            row=0, column=0, columnspan=2, sticky='ew', pady=(0, 6))
 
-    def update_margin_label(self, value):
-        self.margin_label.config(text=f"{int(float(value))}px")
-    
-    def update_size_label(self, value):
-        self.size_label.config(text=f"%{int(float(value))}")
-    
-    def copy_path_to_clipboard(self, event=None):
-        """Kayit konumunu panoya kopyala ve geri bildirim goster"""
+        self.status_label = ttk.Label(bot, text='Haz\u0131r', style='Dim.TLabel')
+        self.status_label.grid(row=1, column=0, sticky='w')
+
+        bfr = ttk.Frame(bot)
+        bfr.grid(row=1, column=1, sticky='e')
+
+        ttk.Button(bfr, text='\u0130\u015flemi Ba\u015flat', style='Accent.TButton',
+                   command=self.start_processing).pack(side='right', padx=4)
+        ttk.Button(bfr, text='Yazd\u0131r',
+                   command=self.print_pdf).pack(side='right', padx=4)
+        ttk.Button(bfr, text='Klas\u00f6r\u00fc A\u00e7',
+                   command=self.open_output_folder).pack(side='right', padx=4)
+        ttk.Button(bfr, text='\u00c7\u0131k\u0131\u015f',
+                   command=self.cleanup_and_exit).pack(side='right', padx=4)
+
+    # ------------------------------------------------------------------
+    # YARDIMCI
+    # ------------------------------------------------------------------
+    def _copy_path(self, _=None):
         self.root.clipboard_clear()
         self.root.clipboard_append(self.output_dir)
-        self.clipboard_feedback_label.config(text="Panoya kopyalandi!", foreground='green')
-        # 2 saniye sonra geri bildirimi kaldir
-        self.root.after(2000, lambda: self.clipboard_feedback_label.config(text=""))
-    
-    def update_quality_label(self, value):
-        self.quality_label.config(text=f"{int(float(value))}%")
+        self.clip_lbl.config(text='Panoya kopyaland\u0131!')
+        self.clip_lbl.configure(background=C_SURFACE)
+        self.root.after(2500, lambda: self.clip_lbl.config(text=''))
 
+    def update_status(self, progress, msg):
+        self.progress_var.set(progress)
+        self.status_label.config(text=msg)
+        self.root.update_idletasks()
+
+    # ------------------------------------------------------------------
+    # DOSYA SECIMI
+    # ------------------------------------------------------------------
     def select_image(self, side):
         try:
-            file_path = filedialog.askopenfilename(
-                title=f"TC Kimlik {side.capitalize()} Yüzünü Seçin",
-                filetypes=[("Resim Dosyaları", "*.jpg *.jpeg *.png *.bmp"), ("Tüm Dosyalar", "*.*")]
-            )
-            
-            if not file_path:
+            path = filedialog.askopenfilename(
+                title=f'TC Kimlik {"On" if side == "front" else "Arka"} Y\u00fcz\u00fc Se\u00e7in',
+                filetypes=[('Resim Dosyalar\u0131', '*.jpg *.jpeg *.png *.bmp'),
+                           ('T\u00fcm Dosyalar', '*.*')])
+            if not path:
                 return
-            
-            ext = os.path.splitext(file_path)[1].lower()
+
+            ext = os.path.splitext(path)[1].lower()
             if ext not in ('.jpg', '.jpeg', '.png', '.bmp'):
-                raise ValueError("Desteklenmeyen dosya formatı. Lütfen JPG, PNG veya BMP seçin.")
-            
+                raise ValueError('Desteklenmeyen format. JPG, PNG veya BMP se\u00e7in.')
+
+            with Image.open(path) as im:
+                im.verify()
+
+            safe = f'{side}_{datetime.now().strftime("%Y%m%d_%H%M%S")}{ext}'
+            tmp = os.path.join(self.temp_dir, safe)
             try:
-                with Image.open(file_path) as img:
-                    img.verify()
-            except Exception as e:
-                raise ValueError(f"Geçersiz resim dosyası: {str(e)}")
-            
-            # Gecici dosya adinda sadece ASCII kullan (Turkce karakter sorunu onlenir)
-            safe_name = f"{side}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
-            temp_path = os.path.join(self.temp_dir, safe_name)
-            try:
-                shutil.copy2(file_path, temp_path)
+                shutil.copy2(path, tmp)
             except Exception:
-                # shutil basarisiz olursa PIL ile oku/yaz
-                pil_img = Image.open(file_path)
-                pil_img.save(temp_path)
-                pil_img.close()
-            
-            if side == "front":
-                self.front_image_path = temp_path
-                self.front_label.config(text=f"Seçili dosya: {os.path.basename(file_path)}")
-                self.display_image(temp_path, self.front_view)
+                Image.open(path).save(tmp)
+
+            if side == 'front':
+                self.front_image_path = tmp
+                self.front_label.config(text=os.path.basename(path))
+                self._show_preview(tmp, self.front_view)
             else:
-                self.back_image_path = temp_path
-                self.back_label.config(text=f"Seçili dosya: {os.path.basename(file_path)}")
-                self.display_image(temp_path, self.back_view)
-                
-            self.update_status(0, f"{side.capitalize()} yüz başarıyla yüklendi")
+                self.back_image_path = tmp
+                self.back_label.config(text=os.path.basename(path))
+                self._show_preview(tmp, self.back_view)
+
+            self.update_status(0, f'{"On" if side == "front" else "Arka"} y\u00fcz y\u00fcklendi')
         except Exception as e:
-            messagebox.showerror("Dosya Seçme Hatası", str(e))
-            self.update_status(0, f"{side.capitalize()} yüz yüklenemedi")
+            messagebox.showerror('Hata', str(e))
 
-    def display_image(self, image_path, label_widget):
+    def _show_preview(self, path, label):
         try:
-            # Etiketin ana çerçevesinin mevcut boyutlarını al
-            # Bu, çerçevenin layout tarafından boyutlandırılmasını bekler
-            label_widget.master.update_idletasks() # Çerçevenin boyutlarının güncellendiğinden emin ol
-            frame_width = label_widget.master.winfo_width()
-            frame_height = label_widget.master.winfo_height()
-
-            # Eğer henüz boyutlar alınamadıysa (ilk yüklemede olabilir) varsayılan bir değer kullan
-            # Bu varsayılan değerler, uygulamanın başlangıçtaki görünümünü korumak için önemlidir.
-            if frame_width < 100 or frame_height < 100: # Güvenli bir alt sınır
-                frame_width = 450 
-                frame_height = 450
-
-            img = Image.open(image_path)
-            
-            # Resmi çerçevenin boyutlarına sığacak şekilde yeniden boyutlandır
-            # Image.LANCZOS, daha iyi kalite için kullanılır
-            img.thumbnail((frame_width, frame_height), Image.LANCZOS)
-            
-            # RGBA (şeffaf) görüntüleri RGB'ye dön��ştürerek arka plan sorunlarını önle
+            label.master.update_idletasks()
+            fw = max(label.master.winfo_width(), 200)
+            fh = max(label.master.winfo_height(), 200)
+            img = Image.open(path)
+            img.thumbnail((fw, fh), Image.LANCZOS)
             if img.mode in ('RGBA', 'LA'):
-                background = Image.new('RGB', img.size, (240, 240, 240)) # Gri tonlu arka plan
-                background.paste(img, mask=img.split()[-1]) # Alfa kanalını maske olarak kullan
-                img = background
-            
-            photo = ImageTk.PhotoImage(img)
-            label_widget.config(image=photo)
-            label_widget.image = photo # Çöp toplamasını önlemek için referansı tut
-            label_widget.config(text="") # Yer tutucu metni temizle
+                bg = Image.new('RGB', img.size, (22, 33, 62))
+                bg.paste(img, mask=img.split()[-1])
+                img = bg
+            ph = ImageTk.PhotoImage(img)
+            label.config(image=ph, text='')
+            label.image = ph
         except Exception as e:
-            label_widget.config(image=None, text=f"Görüntü gösterilemedi:\n{str(e)}")
+            label.config(image='', text=f'Hata:\n{e}')
 
-    def detect_id_card_with_aspect_ratio(self, image):
-        """TC Kimlik kartını boy/en oranıyla birlikte algıla"""
-        try:
-            original_height, original_width = image.shape[:2]
-            print(f"Orijinal görüntü boyutu: {original_width}x{original_height}")
-            
-            # Görüntüyü gri tonlamalı yap
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            
-            # Çoklu yöntem deneme
-            methods = [
-                self.method_canny_contours,
-                self.method_adaptive_threshold,
-                self.method_gradient_based
-            ]
-            
-            for i, method in enumerate(methods):
-                print(f"Yöntem {i+1} deneniyor...")
-                result = method(gray, original_width, original_height)
-                if result:
-                    x, y, w, h = result
-                    print(f"Yöntem {i+1} başarılı: {w}x{h} boyutunda kart bulundu")
-                    return result
-            
-            print("Hiçbir yöntem başarılı olmadı")
+    # ------------------------------------------------------------------
+    # ALGILAMA + KIRPMA + ARKA PLAN SILME
+    # ------------------------------------------------------------------
+    def detect_id_card(self, image):
+        """TC Kimlik kartini algilar, kirpar VE standart boyuta esneterek dondurur."""
+        oh, ow = image.shape[:2]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Coklu yontemle dene
+        for method_fn in (self._det_canny, self._det_adaptive, self._det_gradient):
+            res = method_fn(gray, ow, oh)
+            if res is not None:
+                return res
+        return None
+
+    def _det_canny(self, gray, ow, oh):
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        for lo in (30, 50, 70):
+            for hi in (80, 120, 150):
+                edges = cv2.Canny(blurred, lo, hi, apertureSize=3)
+                k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                cl = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, k, iterations=2)
+                cnts, _ = cv2.findContours(cl, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+                r = self._best_contour(cnts, ow, oh)
+                if r is not None:
+                    return r
+        return None
+
+    def _det_adaptive(self, gray, ow, oh):
+        th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV, 11, 2)
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        m = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=3)
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return self._best_contour(cnts, ow, oh)
+
+    def _det_gradient(self, gray, ow, oh):
+        gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        mag = np.sqrt(gx ** 2 + gy ** 2)
+        mag = np.uint8(mag / mag.max() * 255)
+        _, th = cv2.threshold(mag, 50, 255, cv2.THRESH_BINARY)
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+        m = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=2)
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return self._best_contour(cnts, ow, oh)
+
+    @staticmethod
+    def _is_card_ratio(ar):
+        return (1.2 < ar < 2.0) or (0.5 < ar < 0.83)
+
+    def _best_contour(self, contours, ow, oh):
+        if not contours:
             return None
-            
-        except Exception as e:
-            print(f"Kimlik kartı algılama hatası: {str(e)}")
-            return None
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)
+        min_area = ow * oh * 0.08
+        best, bscore = None, 0.0
 
-    def method_canny_contours(self, gray, orig_width, orig_height):
-        """Canny kenar algılama + kontür yöntemi"""
-        try:
-            # Gürültüyü azalt
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            
-            # Canny kenar algılama - farklı threshold değerleri dene
-            for low_thresh in [30, 50, 70]:
-                for high_thresh in [80, 120, 150]:
-                    edges = cv2.Canny(blurred, low_thresh, high_thresh, apertureSize=3)
-                    
-                    # Morfolojik işlemler
-                    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-                    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
-                    
-                    # Kontürleri bul
-                    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    
-                    if contours:
-                        result = self.analyze_contours(contours, orig_width, orig_height)
-                        if result:
-                            return result
-            
-            return None
-        except: # Hata durumunda None döndür
-            return None
+        for cnt in contours[:15]:
+            area = cv2.contourArea(cnt)
+            if area < min_area:
+                continue
+            x, y, w, h = cv2.boundingRect(cnt)
+            if w < ow * 0.12 or h < oh * 0.12 or w > ow * 0.98 or h > oh * 0.98:
+                continue
+            ar = w / h
+            hull = cv2.convexHull(cnt)
+            ha = cv2.contourArea(hull)
+            sol = float(area) / ha if ha > 0 else 0
 
-    def method_adaptive_threshold(self, gray, orig_width, orig_height):
-        """Adaptive threshold yöntemi"""
-        try:
-            # Adaptive threshold
-            thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                          cv2.THRESH_BINARY_INV, 11, 2)
-            
-            # Morfolojik işlemler
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-            morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
-            
-            # Kontürleri bul
-            contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            if contours:
-                return self.analyze_contours(contours, orig_width, orig_height)
-            
-            return None
-        except: # Hata durumunda None döndür
-            return None
+            if self._is_card_ratio(ar) and sol > 0.65:
+                ideal = 1.586 if ar > 1.0 else 1.0 / 1.586
+                rs = 1.0 - min(abs(ar - ideal) / ideal, 1.0)
+                sc = rs * 0.4 + sol * 0.3 + (area / (ow * oh)) * 0.3
+                if sc > bscore:
+                    bscore = sc
+                    best = (x, y, w, h)
 
-    def method_gradient_based(self, gray, orig_width, orig_height):
-        """Gradient tabanlı yöntem"""
-        try:
-            # Sobel gradientleri
-            grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-            grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-            
-            # Gradient büyüklüğü
-            magnitude = np.sqrt(grad_x**2 + grad_y**2)
-            magnitude = np.uint8(magnitude / magnitude.max() * 255)
-            
-            # Threshold
-            _, thresh = cv2.threshold(magnitude, 50, 255, cv2.THRESH_BINARY)
-            
-            # Morfolojik işlemler
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-            morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-            
-            # Kontürleri bul
-            contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            if contours:
-                return self.analyze_contours(contours, orig_width, orig_height)
-            
-            return None
-        except: # Hata durumunda None döndür
-            return None
+            # 4 kose yaklasimlama
+            eps = 0.02 * cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, eps, True)
+            if len(approx) == 4:
+                x2, y2, w2, h2 = cv2.boundingRect(approx)
+                ar2 = w2 / h2
+                ah = cv2.convexHull(approx)
+                aha = cv2.contourArea(ah)
+                asol = float(cv2.contourArea(approx)) / aha if aha > 0 else 0
+                if self._is_card_ratio(ar2) and asol > 0.65:
+                    ideal2 = 1.586 if ar2 > 1.0 else 1.0 / 1.586
+                    rs2 = 1.0 - min(abs(ar2 - ideal2) / ideal2, 1.0)
+                    sc2 = rs2 * 0.35 + asol * 0.3 + (w2 * h2) / (ow * oh) * 0.25 + 0.1
+                    if sc2 > bscore:
+                        bscore = sc2
+                        best = (x2, y2, w2, h2)
+        return best
 
-    def _is_id_card_ratio(self, aspect_ratio):
-        """TC kimlik kartı oranını kontrol et (yatay veya dikey)"""
-        # TC kimlik: 85.6mm x 53.98mm ≈ 1.586
-        # Yatay (landscape): 1.2 - 2.0
-        # Dikey (portrait):  0.5 - 0.83 (1/2.0 - 1/1.2)
-        return (1.2 < aspect_ratio < 2.0) or (0.5 < aspect_ratio < 0.83)
-
-    def analyze_contours(self, contours, orig_width, orig_height):
-        """Kontürleri analiz et ve en uygun kimlik kartını bul"""
-        try:
-            # Kontürleri alan büyüklüğüne göre sırala
-            contours = sorted(contours, key=cv2.contourArea, reverse=True)
-            
-            min_area_ratio = 0.10  # Goruntunun en az %10'u buyuklugunde olmali
-            min_area = (orig_width * orig_height) * min_area_ratio
-            
-            print(f"Minimum alan: {min_area:.0f} (goruntunun %{int(min_area_ratio*100)}'i)")
-            
-            best_candidate = None
-            best_score = 0
-            
-            # En büyük 15 kontürü kontrol et
-            for i, contour in enumerate(contours[:15]):
-                area = cv2.contourArea(contour)
-                
-                if area < min_area:
-                    print(f"Kontür {i+1} ({area:.0f} alan): Alan çok küçük, atlanıyor.")
-                    continue
-                
-                # Bounding rectangle al
-                x, y, w, h = cv2.boundingRect(contour)
-                
-                # Boyut kontrolü - çok küçük veya çok büyük olmasın
-                if not (w > orig_width * 0.15 and h > orig_height * 0.15 and
-                        w < orig_width * 0.98 and h < orig_height * 0.98):
-                    print(f"Kontür {i+1} ({w}x{h} boyut): Boyut aralığı dışında, atlanıyor.")
-                    continue
-
-                # Boy/en oranı kontrolü (TC kimlik: 85.6mm x 53.98mm ≈ 1.586)
-                aspect_ratio = w / h
-                print(f"Kontür {i+1}: {w}x{h}, oran: {aspect_ratio:.2f}, alan: {area:.0f}")
-                
-                # Sağlamlık hesapla (contour area / convex hull area)
-                hull = cv2.convexHull(contour)
-                hull_area = cv2.contourArea(hull)
-                solidity = float(area) / hull_area if hull_area > 0 else 0
-                print(f"Solidity: {solidity:.2f}")
-
-                # TC kimlik kartı oranı kontrolü (yatay ve dikey desteklenir) ve sağlamlık kontrolü
-                if self._is_id_card_ratio(aspect_ratio) and (solidity > 0.7):
-                    # Skor hesapla: ideal orana yakınlık + sağlamlık + alan büyüklüğü
-                    ideal_ratio = 1.586 if aspect_ratio > 1.0 else 1.0 / 1.586
-                    ratio_score = 1.0 - min(abs(aspect_ratio - ideal_ratio) / ideal_ratio, 1.0)
-                    area_score = area / (orig_width * orig_height)
-                    score = ratio_score * 0.4 + solidity * 0.4 + area_score * 0.2
-                    
-                    print(f"✓ Uygun kart adayı bulundu: {w}x{h}, oran: {aspect_ratio:.2f}, sağlamlık: {solidity:.2f}, skor: {score:.3f}")
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_candidate = (x, y, w, h)
-                else:
-                    print(f"Kontür {i+1}: Oran ({aspect_ratio:.2f}) veya Sağlamlık ({solidity:.2f}) uygun değil, atlanıyor.")
-                
-                # Alternatif: Kontürü yaklaştırarak 4 köşe ara
-                epsilon = 0.02 * cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, epsilon, True)
-                
-                if len(approx) == 4:
-                    x2, y2, w2, h2 = cv2.boundingRect(approx)
-                    aspect_ratio2 = w2 / h2
-                    
-                    # Yaklaştırılmış kontür için sağlamlık hesapla
-                    approx_hull = cv2.convexHull(approx)
-                    approx_hull_area = cv2.contourArea(approx_hull)
-                    approx_solidity = float(cv2.contourArea(approx)) / approx_hull_area if approx_hull_area > 0 else 0
-                    print(f"Yaklaşık 4 köşeli kontür {i+1}: {w2}x{h2}, oran: {aspect_ratio2:.2f}, alan: {cv2.contourArea(approx):.0f}, sağlamlık: {approx_solidity:.2f}")
-
-                    if (self._is_id_card_ratio(aspect_ratio2) and
-                        w2 > orig_width * 0.15 and h2 > orig_height * 0.15 and
-                        approx_solidity > 0.7):
-                        ideal_ratio2 = 1.586 if aspect_ratio2 > 1.0 else 1.0 / 1.586
-                        ratio_score2 = 1.0 - min(abs(aspect_ratio2 - ideal_ratio2) / ideal_ratio2, 1.0)
-                        area_score2 = (w2 * h2) / (orig_width * orig_height)
-                        # 4 köşeli kontüre bonus puan ver (daha kesin tespit)
-                        score2 = ratio_score2 * 0.35 + approx_solidity * 0.35 + area_score2 * 0.2 + 0.1
-                        
-                        print(f"✓ 4 köşeli uygun kart adayı: {w2}x{h2}, oran: {aspect_ratio2:.2f}, sağlamlık: {approx_solidity:.2f}, skor: {score2:.3f}")
-                        
-                        if score2 > best_score:
-                            best_score = score2
-                            best_candidate = (x2, y2, w2, h2)
-                    else:
-                        print(f"Yaklaşık 4 köşeli kontür {i+1}: Oran ({aspect_ratio2:.2f}) veya Sağlamlık ({approx_solidity:.2f}) uygun değil, atlanıyor.")
-            
-            if best_candidate:
-                x, y, w, h = best_candidate
-                print(f"En iyi aday seçildi: {w}x{h}, skor: {best_score:.3f}")
-            return best_candidate
-        except Exception as e:
-            print(f"Kontür analizi hatası: {str(e)}")
-            return None
-
-    def try_perspective_crop(self, image):
-        """Perspektif duzeltme ile kimlik karti kirpma (egik cekilmis fotograflar icin)"""
+    def _perspective_crop(self, image):
+        """Egik cekilmis goruntuler icin perspektif duzeltme"""
         try:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            
-            # Farkli threshold degerleriyle dene
-            for method in ['canny', 'adaptive']:
-                if method == 'canny':
-                    edges = cv2.Canny(blurred, 30, 100)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            oh, ow = image.shape[:2]
+            min_a = ow * oh * 0.08
+
+            for meth in ('canny', 'adaptive'):
+                if meth == 'canny':
+                    edges = cv2.Canny(blur, 30, 100)
                 else:
-                    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    edges = cv2.adaptiveThreshold(blur, 255,
+                                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                                    cv2.THRESH_BINARY_INV, 11, 2)
-                    edges = thresh
-                
-                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-                closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3)
-                
-                contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                contours = sorted(contours, key=cv2.contourArea, reverse=True)
-                
-                oh, ow = image.shape[:2]
-                min_area = ow * oh * 0.1
-                
-                for contour in contours[:10]:
-                    area = cv2.contourArea(contour)
-                    if area < min_area:
+                k = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+                cl = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, k, iterations=3)
+                cnts, _ = cv2.findContours(cl, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+                cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
+
+                for cnt in cnts[:10]:
+                    if cv2.contourArea(cnt) < min_a:
                         continue
-                    
-                    peri = cv2.arcLength(contour, True)
-                    # Farkli epsilon degerleri dene
-                    for eps_mult in [0.02, 0.03, 0.04, 0.05]:
-                        approx = cv2.approxPolyDP(contour, eps_mult * peri, True)
-                        
-                        if len(approx) == 4:
-                            # 4 kose bulduk - perspektif duzeltme uygula
-                            pts = approx.reshape(4, 2).astype(np.float32)
-                            
-                            # Kosaleri sirala: sol-ust, sag-ust, sag-alt, sol-alt
-                            s = pts.sum(axis=1)
-                            d = np.diff(pts, axis=1)
-                            tl = pts[np.argmin(s)]
-                            br = pts[np.argmax(s)]
-                            tr = pts[np.argmin(d)]
-                            bl = pts[np.argmax(d)]
-                            
-                            src_pts = np.array([tl, tr, br, bl], dtype=np.float32)
-                            
-                            # Hedef boyutu hesapla
-                            w1 = np.linalg.norm(br - bl)
-                            w2 = np.linalg.norm(tr - tl)
-                            h1 = np.linalg.norm(tr - br)
-                            h2 = np.linalg.norm(tl - bl)
-                            max_w = int(max(w1, w2))
-                            max_h = int(max(h1, h2))
-                            
-                            if max_w < 50 or max_h < 50:
-                                continue
-                            
-                            # Oran kontrolu
-                            ratio = max_w / max_h if max_w > max_h else max_h / max_w
-                            if not (1.2 < ratio < 2.0):
-                                continue
-                            
-                            # Her zaman yatay cikti
-                            if max_w < max_h:
-                                max_w, max_h = max_h, max_w
-                                dst_pts = np.array([
-                                    [0, max_h], [0, 0], [max_w, 0], [max_w, max_h]
-                                ], dtype=np.float32)
-                            else:
-                                dst_pts = np.array([
-                                    [0, 0], [max_w, 0], [max_w, max_h], [0, max_h]
-                                ], dtype=np.float32)
-                            
-                            M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-                            warped = cv2.warpPerspective(image, M, (max_w, max_h))
-                            
-                            print(f"Perspektif duzeltme basarili: {max_w}x{max_h}, oran: {max_w/max_h:.2f}")
-                            return warped
-            
-            return None
-        except Exception as e:
-            print(f"Perspektif duzeltme hatasi: {str(e)}")
-            return None
+                    peri = cv2.arcLength(cnt, True)
+                    for em in (0.02, 0.03, 0.04, 0.05):
+                        ap = cv2.approxPolyDP(cnt, em * peri, True)
+                        if len(ap) != 4:
+                            continue
+                        pts = ap.reshape(4, 2).astype(np.float32)
+                        s = pts.sum(axis=1)
+                        d = np.diff(pts, axis=1)
+                        tl, br = pts[np.argmin(s)], pts[np.argmax(s)]
+                        tr, bl = pts[np.argmin(d)], pts[np.argmax(d)]
+                        src = np.array([tl, tr, br, bl], dtype=np.float32)
+                        mw = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
+                        mh = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
+                        if mw < 50 or mh < 50:
+                            continue
+                        ratio = mw / mh if mw > mh else mh / mw
+                        if not (1.2 < ratio < 2.0):
+                            continue
+                        if mw < mh:
+                            mw, mh = mh, mw
+                            dst = np.array([[0, mh], [0, 0], [mw, 0], [mw, mh]],
+                                           dtype=np.float32)
+                        else:
+                            dst = np.array([[0, 0], [mw, 0], [mw, mh], [0, mh]],
+                                           dtype=np.float32)
+                        M = cv2.getPerspectiveTransform(src, dst)
+                        return cv2.warpPerspective(image, M, (mw, mh))
+        except Exception:
+            pass
+        return None
 
-    def smart_crop_with_aspect_ratio(self, image):
-        """Boy/en oranini koruyan akilli kirpma"""
+    def _remove_background(self, image):
+        """GrabCut ile kimlik karti cevresindeki arka plani beyaza cevir"""
         try:
-            if not self.auto_crop_var.get():
-                return image
-            
-            # Yontem 1: Kontur tabanli algilama
-            card_bounds = self.detect_id_card_with_aspect_ratio(image)
-            
-            if card_bounds is not None:
-                x, y, w, h = card_bounds
-                
-                # Kenar boslugu ekle (kullanici ayarindan)
-                margin = int(self.margin_var.get())
-                
-                x_start = max(0, x - margin)
-                y_start = max(0, y - margin)
-                x_end = min(image.shape[1], x + w + margin)
-                y_end = min(image.shape[0], y + h + margin)
-                
-                cropped = image[y_start:y_end, x_start:x_end]
-                
-                # Dikey ise yataya cevir
-                crop_h, crop_w = cropped.shape[:2]
-                if crop_w < crop_h:
-                    print("Dikey goruntu algilandi, yatay konuma donduruluyor...")
-                    cropped = cv2.rotate(cropped, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                
-                print(f"Kimlik karti basariyla kirpildi:")
-                print(f"   Orijinal: {image.shape[1]}x{image.shape[0]}")
-                print(f"   Kirpilmis: {cropped.shape[1]}x{cropped.shape[0]}")
-                print(f"   Kenar boslugu: {margin}px")
-                return cropped
-            
-            # Yontem 2: Perspektif duzeltme (egik cekilmis fotograflar)
-            print("Kontur tabanli algilama basarisiz, perspektif duzeltme deneniyor...")
-            perspective_result = self.try_perspective_crop(image)
-            if perspective_result is not None:
-                return perspective_result
-            
-            # Yontem 3: Merkezi kirpma (son care)
-            print("Perspektif duzeltme de basarisiz, merkezi kirpma uygulanacak...")
-            return self.center_crop_with_ratio(image)
-            
-        except Exception as e:
-            print(f"Akilli kirpma hatasi: {str(e)}")
-            return self.center_crop_with_ratio(image)
-
-    def center_crop_with_ratio(self, image):
-        """Merkezi kırpma - kimlik kartı oranını koruyarak"""
-        try:
-            height, width = image.shape[:2]
-            
-            # Eğer dikey (portrait) ise, önce yatay konuma döndür
-            if width < height:
-                print("Merkezi kırpma: Dikey görüntü, yatay konuma döndürülüyor...")
-                image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                height, width = image.shape[:2]
-            
-            # TC kimlik kartı oranı: 1.586
-            target_ratio = 1.586
-            current_ratio = width / height
-            
-            if current_ratio > target_ratio:
-                # Görüntü çok geniş, yüksekliği koru, genişliği azalt
-                new_width = int(height * target_ratio)
-                new_height = height
-                start_x = (width - new_width) // 2
-                start_y = 0
-            else:
-                # Görüntü çok dar, genişliği koru, yüksekliği azalt
-                new_width = width
-                new_height = int(width / target_ratio)
-                start_x = 0
-                start_y = (height - new_height) // 2
-            
-            # Tam boyutta kirp (gereksiz alan kaybini onle)
-            cropped = image[start_y:start_y + new_height, start_x:start_x + new_width]
-            
-            crop_h, crop_w = cropped.shape[:2]
-            print(f"Merkezi kirpma uygulandi:")
-            print(f"   Orijinal: {width}x{height} (oran: {current_ratio:.2f})")
-            print(f"   Kirpilmis: {crop_w}x{crop_h} (oran: {crop_w/crop_h:.2f})")
-            
-            return cropped
-            
-        except Exception as e:
-            print(f"Merkezi kırpma hatası: {str(e)}")
-            return image
-
-    def enhance_image(self, image):
-        """Goruntu iyilestirme - siyah-beyaza cevirir ve kontrastini arttirir"""
-        try:
-            # Renkli ise gri tonlamaya cevir
-            if len(image.shape) == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = image.copy()
-            
-            # Kalite ayarina gore isleme siddeti belirle
-            quality = int(self.quality_var.get())
-            
-            # Gurultu azaltma (kalite yuksekse daha agresif)
-            denoise_h = max(3, min(15, int(quality / 8)))
-            denoised = cv2.fastNlMeansDenoising(gray, None, h=denoise_h, templateWindowSize=7, searchWindowSize=21)
-            
-            # Kontrast iyilestirme - CLAHE
-            clip_limit = 1.5 + (quality / 100.0) * 1.5  # 1.5 ile 3.0 arasi
-            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
-            enhanced = clahe.apply(denoised)
-            
-            # Keskinlestirme (kalite yuksekse daha fazla)
-            if quality > 30:
-                sharpen_amount = 0.1 + (quality / 100.0) * 0.3  # 0.1 ile 0.4 arasi
-                kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]]) / 1.0
-                sharpened = cv2.filter2D(enhanced, -1, kernel)
-                result = cv2.addWeighted(enhanced, 1.0 - sharpen_amount, sharpened, sharpen_amount, 0)
-            else:
-                result = enhanced
-            
-            print(f"Goruntu siyah-beyaza cevrildi (kalite: {quality}%, denoise: {denoise_h}, clip: {clip_limit:.1f})")
+            h, w = image.shape[:2]
+            mask = np.zeros((h, w), np.uint8)
+            bg = np.zeros((1, 65), np.float64)
+            fg = np.zeros((1, 65), np.float64)
+            # Kenarlardan %5 iceri al
+            mx, my = max(2, int(w * 0.05)), max(2, int(h * 0.05))
+            rect = (mx, my, w - 2 * mx, h - 2 * my)
+            cv2.grabCut(image, mask, rect, bg, fg, 5, cv2.GC_INIT_WITH_RECT)
+            mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
+            result = image.copy()
+            result[mask2 == 0] = [255, 255, 255]  # arka plani beyaz yap
+            print('Arka plan basariyla silindi (beyaza cevrildi)')
             return result
-            
         except Exception as e:
-            print(f"Goruntu iyilestirme hatasi: {str(e)}")
-            if len(image.shape) == 3:
-                return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            print(f'Arka plan silme hatasi: {e}')
             return image
 
-    def process_image(self, image_path, output_suffix):
-        """Goruntuleri isle ve gecici dosya olarak kaydet (PDF icin)"""
-        try:
-            # Goruntuyu yukle (Turkce dosya yolu destegi)
-            image = imread_unicode(image_path)
-            if image is None:
-                raise ValueError("Goruntu yuklenemedi")
-            
-            print(f"\n{'='*50}")
-            print(f"Isleniyor: {output_suffix}")
-            print(f"Orijinal goruntu boyutu: {image.shape[1]}x{image.shape[0]}")
-            
-            # Akilli kimlik karti kirpma
-            if self.auto_crop_var.get():
-                self.update_status(30, "TC kimlik karti algilaniyor...")
-                cropped_image = self.smart_crop_with_aspect_ratio(image)
-                print(f"Islenmis goruntu boyutu: {cropped_image.shape[1]}x{cropped_image.shape[0]}")
-            else:
-                cropped_image = image
-                # Kirpma kapali olsa bile dikey ise yataya cevir
-                ch, cw = cropped_image.shape[:2]
-                if cw < ch:
-                    print("Kirpma kapali ama dikey goruntu, yataya cevriliyor...")
-                    cropped_image = cv2.rotate(cropped_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                print("Otomatik kirpma kapali")
-            
-            # Goruntu iyilestirme (siyah-beyaza cevirme dahil)
-            self.update_status(60, "Goruntu isleniyor (S/B)...")
-            enhanced = self.enhance_image(cropped_image)
-            
-            # Son kontrol: dikey ise yataya cevir (her durumda yatay kaydet)
-            if len(enhanced.shape) == 2:
-                eh, ew = enhanced.shape
-            else:
-                eh, ew = enhanced.shape[:2]
-            if ew < eh:
-                print("Kayit oncesi dikey goruntu tespit edildi, yataya cevriliyor...")
-                enhanced = cv2.rotate(enhanced, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            
-            # Gecici dosya olarak kaydet (PDF olusturmak icin)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            temp_filename = f"_temp_kimlik_{output_suffix}_{timestamp}.png"
-            temp_path = os.path.join(self.temp_dir, temp_filename)
-            
-            os.makedirs(self.temp_dir, exist_ok=True)
-            
-            # PNG olarak kaydet (kayipsiz, gecici dosya - Turkce yol destegi)
-            success = imwrite_unicode(temp_path, enhanced)
-            
-            if not success or not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                raise ValueError(f"Gecici dosya olusturulamadi: {temp_path}")
-            
-            print(f"Gecici dosya olusturuldu: {temp_filename} ({os.path.getsize(temp_path)} byte)")
-            print(f"{'='*50}\n")
-            
-            return temp_path
-        except Exception as e:
-            raise Exception(f"Islem sirasinda hata olustu: {str(e)}")
+    def _stretch_to_standard(self, image):
+        """Goruntuyu TC kimlik kartinin standart boyutlarina esneterek kirpar.
+        Standart boyut: 856 x 540 px (85.6mm x 53.98mm oraninda)"""
+        STD_W, STD_H = 856, 540
+        h, w = image.shape[:2] if len(image.shape) == 3 else (image.shape[0], image.shape[1])
+        if w < h:  # dikey ise yataya cevir
+            image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        stretched = cv2.resize(image, (STD_W, STD_H), interpolation=cv2.INTER_LANCZOS4)
+        print(f'Standart boyuta esnetildi: {STD_W}x{STD_H}')
+        return stretched
+
+    def smart_crop(self, image):
+        """Akilli kirpma pipeline'i: algi -> kirp -> arka plan sil -> esneterek boyutlandir"""
+        if not self.auto_crop_var.get():
+            # Kirpma kapali olsa bile dikey ise yataya cevir ve esneterek boyutlandir
+            return self._stretch_to_standard(image)
+
+        # 1) Kontur tabanli algilama
+        bounds = self.detect_id_card(image)
+        if bounds is not None:
+            x, y, w, h = bounds
+            margin = int(self.margin_var.get())
+            oh, ow = image.shape[:2]
+            x0 = max(0, x - margin)
+            y0 = max(0, y - margin)
+            x1 = min(ow, x + w + margin)
+            y1 = min(oh, y + h + margin)
+            cropped = image[y0:y1, x0:x1]
+            print(f'Kimlik algilandi ve kirpildi: {x1-x0}x{y1-y0}')
+            cropped = self._remove_background(cropped)
+            return self._stretch_to_standard(cropped)
+
+        # 2) Perspektif duzeltme
+        print('Kontur algilama basarisiz, perspektif deneniyor...')
+        persp = self._perspective_crop(image)
+        if persp is not None:
+            persp = self._remove_background(persp)
+            return self._stretch_to_standard(persp)
+
+        # 3) Merkezi kirpma (son care)
+        print('Perspektif de basarisiz, merkezi kirpma...')
+        return self._center_crop(image)
+
+    def _center_crop(self, image):
+        h, w = image.shape[:2]
+        if w < h:
+            image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            h, w = image.shape[:2]
+        target = 1.586
+        cur = w / h
+        if cur > target:
+            nw = int(h * target)
+            sx = (w - nw) // 2
+            image = image[0:h, sx:sx + nw]
+        else:
+            nh = int(w / target)
+            sy = (h - nh) // 2
+            image = image[sy:sy + nh, 0:w]
+        return self._stretch_to_standard(image)
+
+    # ------------------------------------------------------------------
+    # GORUNTU IYILESTIRME (siyah-beyaz)
+    # ------------------------------------------------------------------
+    def enhance_image(self, image):
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+
+        q = int(self.quality_var.get())
+        dn_h = max(3, min(15, q // 8))
+        dn = cv2.fastNlMeansDenoising(gray, None, h=dn_h, templateWindowSize=7,
+                                       searchWindowSize=21)
+        cl = 1.5 + (q / 100.0) * 1.5
+        clahe = cv2.createCLAHE(clipLimit=cl, tileGridSize=(8, 8))
+        enh = clahe.apply(dn)
+
+        if q > 30:
+            sa = 0.1 + (q / 100.0) * 0.3
+            kern = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32)
+            sh = cv2.filter2D(enh, -1, kern)
+            enh = cv2.addWeighted(enh, 1.0 - sa, sh, sa, 0)
+
+        print(f'S/B donusum tamamlandi (iyilestirme: %{q})')
+        return enh
+
+    # ------------------------------------------------------------------
+    # ISLEM HATTI
+    # ------------------------------------------------------------------
+    def process_image(self, path, suffix):
+        image = imread_unicode(path)
+        if image is None:
+            raise ValueError('Goruntu yuklenemedi')
+
+        print(f"\n{'='*50}\nIsleniyor: {suffix}")
+        print(f'Orijinal: {image.shape[1]}x{image.shape[0]}')
+
+        self.update_status(30, f'{suffix.capitalize()} y\u00fcz k\u0131rp\u0131l\u0131yor...')
+        cropped = self.smart_crop(image)
+
+        self.update_status(60, 'S/B d\u00f6n\u00fc\u015f\u00fcm...')
+        enhanced = self.enhance_image(cropped)
+
+        # Son dikey kontrol
+        eh, ew = (enhanced.shape[:2] if len(enhanced.shape) == 3
+                  else (enhanced.shape[0], enhanced.shape[1]))
+        if ew < eh:
+            enhanced = cv2.rotate(enhanced, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        tmp = os.path.join(self.temp_dir, f'_tmp_{suffix}_{ts}.png')
+        os.makedirs(self.temp_dir, exist_ok=True)
+        if not imwrite_unicode(tmp, enhanced):
+            raise ValueError('Gecici dosya olusturulamadi')
+        print(f'Gecici: {tmp} ({os.path.getsize(tmp)} byte)\n{"="*50}')
+        return tmp
 
     def start_processing(self):
-        # İşlemi ayrı bir thread'de başlat
         if not self.front_image_path and not self.back_image_path:
-            messagebox.showwarning("Uyarı", "Lütfen en az bir görsel seçin!")
+            messagebox.showwarning('Uyar\u0131', 'L\u00fctfen en az bir g\u00f6rsel se\u00e7in!')
             return
-        
-        # İşlemi başlatmadan önce butonları devre dışı bırak
-        self.toggle_buttons_state("disabled")
-        
-        processing_thread = threading.Thread(target=self._run_processing)
-        processing_thread.start()
+        self._toggle_btns('disabled')
+        threading.Thread(target=self._run, daemon=True).start()
 
-    def create_combined_pdf(self, image_paths):
-        """On ve arka yuz goruntulerini tek bir PDF dosyasina birlestirir"""
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            pdf_filename = f"kimlik_tam_{timestamp}.pdf"
-            pdf_path = os.path.join(self.output_dir, pdf_filename)
-            
-            print(f"PDF olusturuluyor: {pdf_path}")
-            print(f"Goruntu sayisi: {len(image_paths)}")
-            for p in image_paths:
-                print(f"  Kaynak: {p} (var: {os.path.exists(p)}, boyut: {os.path.getsize(p)} byte)")
-            
-            # Goruntuleri PIL Image olarak ac ve hepsini RGB'ye cevir
-            pil_images = []
-            for img_path in image_paths:
-                img = Image.open(img_path)
-                # Her turlu modu RGB'ye cevir (PDF sadece RGB destekler)
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                # Dikey ise yataya cevir
-                if img.width < img.height:
-                    img = img.transpose(Image.ROTATE_90)
-                pil_images.append(img.copy())
-                img.close()
-            
-            if not pil_images:
-                raise ValueError("PDF icin goruntu bulunamadi")
-            
-            # Kullanicinin sectigi PDF kart boyutu (sayfa genisliginin yuzdesi)
-            pdf_scale_pct = self.pdf_scale_var.get()  # 30-100 arasi
-            print(f"PDF kart boyutu: %{pdf_scale_pct}")
-            
-            # A4 sayfa boyutu (piksel cinsinden, 150 DPI): 1240 x 1754
-            dpi = 150
-            a4_width = int(8.27 * dpi)   # 1240 px
-            a4_height = int(11.69 * dpi)  # 1754 px
-            margin = int(0.5 * dpi)       # 75 px (1.27 cm)
-            full_usable_width = a4_width - 2 * margin
-            # Kullanici ayarina gore kullanilabilir genisligi daralt
-            usable_width = int(full_usable_width * pdf_scale_pct / 100.0)
-            
-            # A4 sayfa olustur
-            page = Image.new('RGB', (a4_width, a4_height), (255, 255, 255))
-            
-            # Her goruntunun yukseklik payini hesapla
-            card_spacing = int(0.3 * dpi)  # kartlar arasi bosluk (~0.76 cm)
-            available_height = a4_height - 2 * margin
-            num_images = len(pil_images)
-            card_height_each = (available_height - card_spacing * (num_images - 1)) // num_images
-            
-            y_offset = margin
-            
-            for i, img in enumerate(pil_images):
-                # Goruntunun en-boy oranini koru, alana sigdir
-                img_ratio = img.width / img.height
-                target_width = usable_width
-                target_height = int(target_width / img_ratio)
-                
-                if target_height > card_height_each:
-                    target_height = card_height_each
-                    target_width = int(target_height * img_ratio)
-                
-                resized = img.resize((target_width, target_height), Image.LANCZOS)
-                
-                # Yatay ortalama (tam sayfa genisligine gore ortala)
-                x_pos = margin + (full_usable_width - target_width) // 2
-                page.paste(resized, (x_pos, y_offset))
-                
-                print(f"  Goruntu {i+1} yerlesti: {target_width}x{target_height} @ ({x_pos}, {y_offset})")
-                
-                y_offset += target_height + card_spacing
-            
-            # PDF olarak kaydet
-            page.save(pdf_path, format='PDF', resolution=dpi)
-            
-            # Dogrulama
-            if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
-                print(f"PDF basariyla olusturuldu: {pdf_filename} ({os.path.getsize(pdf_path)} byte)")
-            else:
-                raise ValueError("PDF dosyasi olusturulamadi veya bos")
-            
-            # Son PDF yolunu sakla (yazdirma icin)
-            self.last_pdf_path = pdf_path
-            
-            return pdf_path
-            
-        except Exception as e:
-            print(f"PDF olusturma hatasi: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            raise Exception(f"PDF olusturulamadi: {str(e)}")
-
-    def _run_processing(self):
-        temp_files = []
+    def _run(self):
+        temps = []
         try:
             self.progress_var.set(0)
-            self.update_status(10, "Islem baslatiliyor...")
-            
-            # Cikti klasorunu olustur
+            self.update_status(10, '\u0130\u015flem ba\u015flat\u0131l\u0131yor...')
             os.makedirs(self.output_dir, exist_ok=True)
-            
+
             if self.front_image_path:
-                self.update_status(20, "On yuz isleniyor...")
-                temp_path = self.process_image(self.front_image_path, "on")
-                temp_files.append(temp_path)
+                self.update_status(20, '\u00d6n y\u00fcz i\u015fleniyor...')
+                temps.append(self.process_image(self.front_image_path, 'on'))
                 self.progress_var.set(40)
-            
+
             if self.back_image_path:
-                self.update_status(50, "Arka yuz isleniyor...")
-                temp_path = self.process_image(self.back_image_path, "arka")
-                temp_files.append(temp_path)
+                self.update_status(50, 'Arka y\u00fcz i\u015fleniyor...')
+                temps.append(self.process_image(self.back_image_path, 'arka'))
                 self.progress_var.set(70)
-            
-            # PDF olustur (en az 1 goruntu varsa)
-            pdf_path = None
-            if temp_files:
-                self.update_status(80, "PDF olusturuluyor...")
-                pdf_path = self.create_combined_pdf(temp_files)
+
+            pdf = None
+            if temps:
+                self.update_status(80, 'PDF olu\u015fturuluyor...')
+                pdf = self._make_pdf(temps)
                 self.progress_var.set(95)
-            
-            # Gecici dosyalari sil
-            for tf in temp_files:
-                try:
-                    if os.path.exists(tf):
-                        os.remove(tf)
-                        print(f"Gecici dosya silindi: {tf}")
-                except Exception:
-                    pass
-            
-            self.update_status(100, "Islem tamamlandi!")
-            
-            # Sonuclari goster
-            if pdf_path:
-                pdf_size = os.path.getsize(pdf_path) / 1024
-                yuz_sayisi = len(temp_files)
-                yuz_text = "on + arka yuz" if yuz_sayisi == 2 else "tek yuz"
-                result_message = (
-                    f"Islem basariyla tamamlandi!\n\n"
-                    f"PDF: {os.path.basename(pdf_path)}\n"
-                    f"Boyut: {pdf_size:.1f} KB ({yuz_text})\n"
-                    f"Kart olcegi: %{self.pdf_scale_var.get()}\n\n"
-                    f"Kayit konumunu kopyalamak icin\n"
-                    f"'Kayit Bilgisi' alanindaki yola tiklayin."
-                )
-                
-                messagebox.showinfo("Basarili", result_message)
-            
+
+            for t in temps:
+                try: os.remove(t)
+                except: pass
+
+            self.update_status(100, '\u0130\u015flem tamamland\u0131!')
+            if pdf:
+                sz = os.path.getsize(pdf) / 1024
+                n = len(temps)
+                yt = '\u00f6n + arka y\u00fcz' if n == 2 else 'tek y\u00fcz'
+                messagebox.showinfo('Ba\u015far\u0131l\u0131',
+                    f'\u0130\u015flem tamamland\u0131!\n\n'
+                    f'PDF: {os.path.basename(pdf)}\n'
+                    f'Boyut: {sz:.1f} KB ({yt})\n'
+                    f'Kart \u00f6l\u00e7e\u011fi: %{self.pdf_scale_var.get()}\n\n'
+                    f'Kay\u0131t konumunu kopyalamak i\u00e7in\n'
+                    f'Kay\u0131t Bilgisi alan\u0131ndaki yola t\u0131klay\u0131n.')
             self.progress_var.set(0)
-            
+
         except Exception as e:
-            # Hata durumunda da gecici dosyalari temizle
-            for tf in temp_files:
-                try:
-                    if os.path.exists(tf):
-                        os.remove(tf)
-                except Exception:
-                    pass
-            messagebox.showerror("Islem Hatasi", str(e))
-            self.update_status(0, f"Hata: {str(e)}")
+            for t in temps:
+                try: os.remove(t)
+                except: pass
+            messagebox.showerror('\u0130\u015flem Hatas\u0131', str(e))
+            self.update_status(0, f'Hata: {e}')
             self.progress_var.set(0)
         finally:
-            self.toggle_buttons_state("normal")
+            self._toggle_btns('normal')
 
+    # ------------------------------------------------------------------
+    # PDF OLUSTURMA
+    # ------------------------------------------------------------------
+    def _make_pdf(self, paths):
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        pdf_path = os.path.join(self.output_dir, f'kimlik_{ts}.pdf')
 
-    def toggle_buttons_state(self, state):
-        # Butonların durumunu değiştiren yardımcı fonksiyon
-        for child in self.root.winfo_children():
-            if isinstance(child, ttk.Frame):
-                for sub_child in child.winfo_children():
-                    if isinstance(sub_child, ttk.Frame): # bottom_frame ve btn_frame
-                        for btn in sub_child.winfo_children():
-                            if isinstance(btn, ttk.Button):
-                                btn.config(state=state)
-                    # Diğer frame'lerdeki butonlar için de kontrol
-                    elif isinstance(sub_child, ttk.Button):
-                        sub_child.config(state=state)
-        # Sadece işlem başlatma, klasör açma ve çıkış butonlarını hedeflemek daha iyi olabilir
-        # Ancak bu genel çözüm şimdilik yeterli.
+        imgs = []
+        for p in paths:
+            im = Image.open(p)
+            if im.mode != 'RGB':
+                im = im.convert('RGB')
+            if im.width < im.height:
+                im = im.transpose(Image.ROTATE_90)
+            imgs.append(im.copy())
+            im.close()
 
+        if not imgs:
+            raise ValueError('PDF icin goruntu yok')
+
+        scale = self.pdf_scale_var.get() / 100.0
+        dpi = 150
+        pw, ph = int(8.27 * dpi), int(11.69 * dpi)
+        mg = int(0.5 * dpi)
+        full_w = pw - 2 * mg
+        usable_w = int(full_w * scale)
+        spacing = int(0.3 * dpi)
+        avail_h = ph - 2 * mg
+        each_h = (avail_h - spacing * (len(imgs) - 1)) // len(imgs)
+
+        page = Image.new('RGB', (pw, ph), (255, 255, 255))
+        y = mg
+        for im in imgs:
+            r = im.width / im.height
+            tw, th = usable_w, int(usable_w / r)
+            if th > each_h:
+                th = each_h
+                tw = int(th * r)
+            resized = im.resize((tw, th), Image.LANCZOS)
+            x = mg + (full_w - tw) // 2
+            page.paste(resized, (x, y))
+            y += th + spacing
+
+        page.save(pdf_path, format='PDF', resolution=dpi)
+        if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
+            raise ValueError('PDF olusturulamadi')
+        self.last_pdf_path = pdf_path
+        print(f'PDF olusturuldu: {pdf_path} ({os.path.getsize(pdf_path)} byte)')
+        return pdf_path
+
+    # ------------------------------------------------------------------
+    # YAZDIR / KLASOR / CIKIS
+    # ------------------------------------------------------------------
     def print_pdf(self):
-        """Son olusturulan PDF'yi varsayilan uygulamada acar (kullanici oradan yazdirir)"""
         try:
             if not self.last_pdf_path or not os.path.exists(self.last_pdf_path):
-                messagebox.showwarning("Uyari", 
-                    "Yazdirilacak PDF bulunamadi.\nOnce 'Islemi Baslat' ile kimlik isleyin.")
+                messagebox.showwarning('Uyar\u0131',
+                    'Yazd\u0131r\u0131lacak PDF yok.\n\u00d6nce i\u015flemi ba\u015flat\u0131n.')
                 return
-            
-            pdf_path = os.path.normpath(self.last_pdf_path)
-            system = platform.system()
-            
-            if system == 'Windows':
-                os.startfile(pdf_path)
-            elif system == 'Darwin':
-                subprocess.Popen(['open', pdf_path])
+            p = os.path.normpath(self.last_pdf_path)
+            s = platform.system()
+            if s == 'Windows':
+                os.startfile(p)
+            elif s == 'Darwin':
+                subprocess.Popen(['open', p])
             else:
-                subprocess.Popen(['xdg-open', pdf_path])
-            
-            self.update_status(0, "PDF acildi - Ctrl+P ile yazdiriniz")
-                
+                subprocess.Popen(['xdg-open', p])
+            self.update_status(0, 'PDF a\u00e7\u0131ld\u0131 \u2013 Ctrl+P ile yazd\u0131r\u0131n')
         except Exception as e:
-            messagebox.showerror("Yazdirma Hatasi", 
-                f"PDF acilamadi:\n{str(e)}\n\n"
-                f"PDF dosyasi: {self.last_pdf_path}\n"
-                f"Dosyayi manuel olarak acip yazdiriniz.")
+            messagebox.showerror('Hata', f'PDF a\u00e7\u0131lamad\u0131:\n{e}')
 
     def open_output_folder(self):
-        """Cikti klasorunu ac"""
         try:
             if os.path.exists(self.output_dir):
-                os.startfile(self.output_dir)
+                if platform.system() == 'Windows':
+                    os.startfile(self.output_dir)
+                elif platform.system() == 'Darwin':
+                    subprocess.Popen(['open', self.output_dir])
+                else:
+                    subprocess.Popen(['xdg-open', self.output_dir])
             else:
-                messagebox.showinfo("Bilgi", f"Klasör henüz oluşturulmadı:\n{self.output_dir}")
+                messagebox.showinfo('Bilgi', f'Klas\u00f6r hen\u00fcz olu\u015fturulmad\u0131.')
         except Exception as e:
-            messagebox.showerror("Hata", f"Klasör açılamadı: {str(e)}")
+            messagebox.showerror('Hata', str(e))
 
-    def update_status(self, progress, message):
-        self.progress_var.set(progress)
-        self.status_label.config(text=message)
-        self.root.update_idletasks() # UI'yı hemen güncelle
+    def _toggle_btns(self, state):
+        for child in self.root.winfo_children():
+            self._recursive_btn_state(child, state)
+
+    def _recursive_btn_state(self, widget, state):
+        if isinstance(widget, ttk.Button):
+            widget.config(state=state)
+        for child in widget.winfo_children():
+            self._recursive_btn_state(child, state)
 
     def cleanup_and_exit(self):
         try:
             if os.path.exists(self.temp_dir):
                 shutil.rmtree(self.temp_dir)
-        except Exception as e:
-            print(f"Temizleme hatası: {str(e)}")
-        finally:
-            self.root.quit() # Tkinter uygulamasını güvenli bir şekilde kapat
+        except Exception:
+            pass
+        self.root.quit()
 
     def run(self):
-        self.root.protocol("WM_DELETE_WINDOW", self.cleanup_and_exit) # Pencere kapatma olayını yakala
+        self.root.protocol('WM_DELETE_WINDOW', self.cleanup_and_exit)
         self.root.mainloop()
 
-if __name__ == "__main__":
-    print("TC Kimlik Karti Duzenleyici v2 by SWAPNIL")
-    print("=" * 60)
-    print("Ozellikler:")
-    print("  Akilli kimlik karti kirpma (yatay + dikey + perspektif)")
-    print("  Coklu algilama (Canny, Adaptive, Gradient)")
-    print("  Siyah-beyaz donusum + iyilestirme")
-    print("  PDF cikti (ayarlanabilir kart boyutu)")
-    print("  Turkce dosya yolu destegi")
-    print("  Tek tikla yazdirma")
-    print("=" * 60)
-    
+
+if __name__ == '__main__':
+    print('TC Kimlik Karti Duzenleyici v2 by SWAPNIL')
+    print('=' * 60)
+    print('Ozellikler:')
+    print('  Akilli kimlik karti algilama + kirpma + esnetme')
+    print('  Perspektif duzeltme (egik fotolar)')
+    print('  Arka plan silme (GrabCut)')
+    print('  Siyah-beyaz donusum + iyilestirme')
+    print('  PDF cikti (ayarlanabilir kart boyutu)')
+    print('  Turkce karakter destegi')
+    print('  Tek tikla yazdirma')
+    print('=' * 60)
     app = IDCardProcessor()
     app.run()
