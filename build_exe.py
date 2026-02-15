@@ -15,6 +15,7 @@ PyInstaller.__main__.run([
     '--hidden-import=PIL.Image',
     '--hidden-import=PIL.ImageTk',
     '--hidden-import=PIL.ImageOps',
+    '--hidden-import=PIL.PdfImagePlugin',
     '--collect-all=cv2',
     '--collect-all=numpy',
     '--collect-all=PIL',

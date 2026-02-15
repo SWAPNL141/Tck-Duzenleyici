@@ -17,6 +17,7 @@ a = Analysis(
         'PIL.Image',
         'PIL.ImageTk',
         'PIL.ImageOps',
+        'PIL.PdfImagePlugin',
     ] + cv2_hiddenimports + numpy_hiddenimports + pil_hiddenimports,
     hookspath=[],
     hooksconfig={},

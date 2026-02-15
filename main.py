@@ -4,8 +4,11 @@ import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk, ImageOps
+import PIL.PdfImagePlugin  # PyInstaller icin PDF eklentisini acikca yukle
 import threading
 import sys
+import subprocess
+import platform
 from datetime import datetime
 import shutil
 
@@ -67,6 +70,7 @@ class IDCardProcessor:
         self.temp_dir = os.path.join(os.getenv("TEMP"), "kimlik_islemleri")
         self.front_image_path = ""
         self.back_image_path = ""
+        self.last_pdf_path = ""
         
         # Belgeler klasörüne sabit kayıt yolu
         documents_path = os.path.join(os.path.expanduser("~"), "Documents")
@@ -195,13 +199,15 @@ class IDCardProcessor:
         self.status_label.grid(row=1, column=0, sticky="ew")
         
         btn_frame = ttk.Frame(bottom_frame)
-        btn_frame.grid(row=1, column=1, sticky="e") # Butonları sağa hizala
+        btn_frame.grid(row=1, column=1, sticky="e") # Butonlari saga hizala
         
-        ttk.Button(btn_frame, text="Klasörü Aç", 
+        ttk.Button(btn_frame, text="Yazdir", 
+                   command=self.print_pdf).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="Klasoru Ac", 
                    command=self.open_output_folder).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="İşlemi Başlat", 
+        ttk.Button(btn_frame, text="Islemi Baslat", 
                    command=self.start_processing).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="Çıkış", 
+        ttk.Button(btn_frame, text="Cikis", 
                    command=self.cleanup_and_exit).pack(side=tk.RIGHT, padx=5)
 
     def update_margin_label(self, value):
@@ -586,27 +592,36 @@ class IDCardProcessor:
             return image
 
     def enhance_image(self, image):
-        """Görüntü iyileştirme"""
+        """Görüntü iyileştirme - renk bilgisini koruyarak"""
         try:
-            # Eğer renkli görüntüyse, gri tonlamalı yap
             if len(image.shape) == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                # Renkli goruntu: LAB renk uzayina cevir, sadece L kanalini iyilestir
+                lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+                l_channel, a_channel, b_channel = cv2.split(lab)
+                
+                # L kanalina gurultu azaltma
+                l_denoised = cv2.fastNlMeansDenoising(l_channel, None, h=10, templateWindowSize=7, searchWindowSize=21)
+                
+                # Kontrast iyilestirme (sadece L kanali)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                l_enhanced = clahe.apply(l_denoised)
+                
+                # Hafif keskinlestirme
+                kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]]) / 1.0
+                l_sharpened = cv2.filter2D(l_enhanced, -1, kernel)
+                l_result = cv2.addWeighted(l_enhanced, 0.8, l_sharpened, 0.2, 0)
+                
+                # Kanallari birlestir ve BGR'ye geri dondur
+                merged = cv2.merge([l_result, a_channel, b_channel])
+                result = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
             else:
-                gray = image.copy()
-            
-            # Gürültü azaltma
-            denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
-            
-            # Kontrast iyileştirme
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-            enhanced = clahe.apply(denoised)
-            
-            # Hafif keskinleştirme
-            kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]]) / 1.0
-            sharpened = cv2.filter2D(enhanced, -1, kernel)
-            
-            # Orijinal ile karıştır
-            result = cv2.addWeighted(enhanced, 0.8, sharpened, 0.2, 0)
+                # Gri tonlamali goruntu
+                denoised = cv2.fastNlMeansDenoising(image, None, h=10, templateWindowSize=7, searchWindowSize=21)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                enhanced = clahe.apply(denoised)
+                kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]]) / 1.0
+                sharpened = cv2.filter2D(enhanced, -1, kernel)
+                result = cv2.addWeighted(enhanced, 0.8, sharpened, 0.2, 0)
             
             return result
             
@@ -637,6 +652,12 @@ class IDCardProcessor:
             # Görüntü iyileştirme
             self.update_status(60, "Görüntü iyileştiriliyor...")
             enhanced = self.enhance_image(cropped_image)
+            
+            # Son kontrol: dikey ise yataya cevir (her durumda yatay kaydet)
+            eh, ew = enhanced.shape[:2]
+            if ew < eh:
+                print("Kayit oncesi dikey goruntu tespit edildi, yataya cevriliyor...")
+                enhanced = cv2.rotate(enhanced, cv2.ROTATE_90_COUNTERCLOCKWISE)
             
             # Çıktı dosya yolunu oluştur
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -694,51 +715,57 @@ class IDCardProcessor:
         processing_thread.start()
 
     def create_combined_pdf(self, image_paths):
-        """Ön ve arka yüz görüntülerini tek bir PDF dosyasına birleştirir"""
+        """On ve arka yuz goruntulerini tek bir PDF dosyasina birlestirir"""
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             pdf_filename = f"kimlik_tam_{timestamp}.pdf"
             pdf_path = os.path.join(self.output_dir, pdf_filename)
             
-            # Görüntüleri PIL Image olarak aç
+            print(f"PDF olusturuluyor: {pdf_path}")
+            print(f"Goruntu sayisi: {len(image_paths)}")
+            for p in image_paths:
+                print(f"  Kaynak: {p} (var: {os.path.exists(p)}, boyut: {os.path.getsize(p)} byte)")
+            
+            # Goruntuleri PIL Image olarak ac ve hepsini RGB'ye cevir
             pil_images = []
             for img_path in image_paths:
                 img = Image.open(img_path)
-                # RGBA ise RGB'ye dönüştür (PDF RGBA desteklemez)
-                if img.mode in ('RGBA', 'LA', 'P'):
+                # Her turlu modu RGB'ye cevir (PDF sadece RGB destekler)
+                if img.mode != 'RGB':
                     img = img.convert('RGB')
-                elif img.mode != 'RGB':
-                    img = img.convert('RGB')
-                pil_images.append(img)
+                # Dikey ise yataya cevir
+                if img.width < img.height:
+                    img = img.transpose(Image.ROTATE_90)
+                pil_images.append(img.copy())
+                img.close()
             
             if not pil_images:
-                raise ValueError("PDF için görüntü bulunamadı")
+                raise ValueError("PDF icin goruntu bulunamadi")
             
-            # A4 sayfa boyutu (piksel cinsinden, 72 DPI): 595 x 842
-            # Kimlik kartlarını A4 sayfaya yerleştir
-            a4_width, a4_height = 595, 842
-            margin = 40
+            # A4 sayfa boyutu (piksel cinsinden, 150 DPI): 1240 x 1754
+            dpi = 150
+            a4_width = int(8.27 * dpi)   # 1240 px
+            a4_height = int(11.69 * dpi)  # 1754 px
+            margin = int(0.5 * dpi)       # 75 px (1.27 cm)
             usable_width = a4_width - 2 * margin
             
-            # Tüm görüntüleri tek bir A4 sayfaya sığdır
-            # Her görüntüyü sayfanın genişliğine göre ölçeklendir
-            page = Image.new('RGB', (a4_width, a4_height), 'white')
+            # A4 sayfa olustur
+            page = Image.new('RGB', (a4_width, a4_height), (255, 255, 255))
             
-            # Başlık
+            # Her goruntunun yukseklik payini hesapla
+            card_spacing = int(0.3 * dpi)  # kartlar arasi bosluk (~0.76 cm)
+            available_height = a4_height - 2 * margin
+            num_images = len(pil_images)
+            card_height_each = (available_height - card_spacing * (num_images - 1)) // num_images
+            
             y_offset = margin
             
-            # Her bir görüntüyü yerleştir
-            card_spacing = 20
-            available_height = a4_height - 2 * margin
-            card_height_each = (available_height - card_spacing) // len(pil_images)
-            
             for i, img in enumerate(pil_images):
-                # Görüntüyü kullanılabilir alana sığdır
+                # Goruntunun en-boy oranini koru, alana sigdir
                 img_ratio = img.width / img.height
                 target_width = usable_width
                 target_height = int(target_width / img_ratio)
                 
-                # Eğer yükseklik çok fazlaysa, yüksekliğe göre ölçeklendir
                 if target_height > card_height_each:
                     target_height = card_height_each
                     target_width = int(target_height * img_ratio)
@@ -749,17 +776,29 @@ class IDCardProcessor:
                 x_pos = margin + (usable_width - target_width) // 2
                 page.paste(resized, (x_pos, y_offset))
                 
+                print(f"  Goruntu {i+1} yerlesti: {target_width}x{target_height} @ ({x_pos}, {y_offset})")
+                
                 y_offset += target_height + card_spacing
             
             # PDF olarak kaydet
-            page.save(pdf_path, 'PDF', resolution=150)
+            page.save(pdf_path, format='PDF', resolution=dpi)
             
-            print(f"PDF oluşturuldu: {pdf_filename}")
+            # Dogrulama
+            if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+                print(f"PDF basariyla olusturuldu: {pdf_filename} ({os.path.getsize(pdf_path)} byte)")
+            else:
+                raise ValueError("PDF dosyasi olusturulamadi veya bos")
+            
+            # Son PDF yolunu sakla (yazdirma icin)
+            self.last_pdf_path = pdf_path
+            
             return pdf_path
             
         except Exception as e:
-            print(f"PDF oluşturma hatası: {str(e)}")
-            raise Exception(f"PDF oluşturulamadı: {str(e)}")
+            print(f"PDF olusturma hatasi: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise Exception(f"PDF olusturulamadi: {str(e)}")
 
     def _run_processing(self):
         try:
@@ -831,8 +870,38 @@ class IDCardProcessor:
         # Sadece işlem başlatma, klasör açma ve çıkış butonlarını hedeflemek daha iyi olabilir
         # Ancak bu genel çözüm şimdilik yeterli.
 
+    def print_pdf(self):
+        """Son olusturulan PDF'yi yaziciya gonder"""
+        try:
+            if not self.last_pdf_path or not os.path.exists(self.last_pdf_path):
+                messagebox.showwarning("Uyari", 
+                    "Yazdirilacak PDF bulunamadi.\nOnce 'Islemi Baslat' ile kimlik isleyin.")
+                return
+            
+            system = platform.system()
+            
+            if system == 'Windows':
+                # Windows: os.startfile ile 'print' komutu
+                os.startfile(self.last_pdf_path, 'print')
+                print(f"Yazdirma komutu gonderildi: {self.last_pdf_path}")
+            elif system == 'Darwin':
+                # macOS: lpr komutu
+                subprocess.run(['lpr', self.last_pdf_path], check=True)
+                print(f"Yazdirma komutu gonderildi (macOS): {self.last_pdf_path}")
+            else:
+                # Linux: lpr komutu
+                subprocess.run(['lpr', self.last_pdf_path], check=True)
+                print(f"Yazdirma komutu gonderildi (Linux): {self.last_pdf_path}")
+            
+            self.update_status(0, "PDF yaziciya gonderildi")
+                
+        except Exception as e:
+            messagebox.showerror("Yazdirma Hatasi", 
+                f"PDF yazdirilirken hata olustu:\n{str(e)}\n\n"
+                f"Alternatif: Klasoru acip PDF'yi manuel olarak yazdirabilirsiniz.")
+
     def open_output_folder(self):
-        """Çıktı klasörünü aç"""
+        """Cikti klasorunu ac"""
         try:
             if os.path.exists(self.output_dir):
                 os.startfile(self.output_dir)
