@@ -7,8 +7,17 @@ PyInstaller.__main__.run([
     '--onefile',
     '--windowed',
     '--name=TCKimlikIslemci',
-    '--icon=app.ico',  # Kendi ikon dosyanızı ekleyin
-    '--add-data=assets;assets',  # Gerekli asset klasörü
+    '--icon=app.ico',
+    '--add-data=assets;assets',
+    '--hidden-import=cv2',
+    '--hidden-import=numpy',
+    '--hidden-import=PIL',
+    '--hidden-import=PIL.Image',
+    '--hidden-import=PIL.ImageTk',
+    '--hidden-import=PIL.ImageOps',
+    '--collect-all=cv2',
+    '--collect-all=numpy',
+    '--collect-all=PIL',
     '--distpath=./dist',
     '--workpath=./build',
     '--clean'

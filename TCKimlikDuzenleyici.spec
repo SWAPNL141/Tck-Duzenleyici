@@ -1,11 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+cv2_datas, cv2_binaries, cv2_hiddenimports = collect_all('cv2')
+numpy_datas, numpy_binaries, numpy_hiddenimports = collect_all('numpy')
+pil_datas, pil_binaries, pil_hiddenimports = collect_all('PIL')
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=cv2_binaries + numpy_binaries + pil_binaries,
+    datas=cv2_datas + numpy_datas + pil_datas,
+    hiddenimports=[
+        'cv2',
+        'numpy',
+        'PIL',
+        'PIL.Image',
+        'PIL.ImageTk',
+        'PIL.ImageOps',
+    ] + cv2_hiddenimports + numpy_hiddenimports + pil_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
