@@ -151,12 +151,11 @@ class IDCardProcessor:
         self.size_label.grid(row=2, column=2, padx=5)
         size_scale.configure(command=self.update_size_label)
         
-        ttk.Label(settings_frame, text="Görüntü Kalitesi:").grid(row=3, column=0, padx=5, sticky='w')
-        self.quality_var = tk.IntVar(value=95)
-        # Görüntü kalitesi ayarını %0'dan (kapalı) %100'e kadar düzenledim.
-        quality_scale = ttk.Scale(settings_frame, from_=0, to=100, variable=self.quality_var, orient=tk.HORIZONTAL)
+        ttk.Label(settings_frame, text="Iyilestirme Seviyesi:").grid(row=3, column=0, padx=5, sticky='w')
+        self.quality_var = tk.IntVar(value=70)
+        quality_scale = ttk.Scale(settings_frame, from_=10, to=100, variable=self.quality_var, orient=tk.HORIZONTAL)
         quality_scale.grid(row=3, column=1, padx=5, sticky='ew') # Yatayda genişle
-        self.quality_label = ttk.Label(settings_frame, text="95%")
+        self.quality_label = ttk.Label(settings_frame, text="70%")
         self.quality_label.grid(row=3, column=2, padx=5)
         quality_scale.configure(command=self.update_quality_label)
 
@@ -276,7 +275,7 @@ class IDCardProcessor:
             # Image.LANCZOS, daha iyi kalite için kullanılır
             img.thumbnail((frame_width, frame_height), Image.LANCZOS)
             
-            # RGBA (şeffaf) görüntüleri RGB'ye dönüştürerek arka plan sorunlarını önle
+            # RGBA (şeffaf) görüntüleri RGB'ye dön��ştürerek arka plan sorunlarını önle
             if img.mode in ('RGBA', 'LA'):
                 background = Image.new('RGB', img.size, (240, 240, 240)) # Gri tonlu arka plan
                 background.paste(img, mask=img.split()[-1]) # Alfa kanalını maske olarak kullan
@@ -499,48 +498,138 @@ class IDCardProcessor:
             print(f"Kontür analizi hatası: {str(e)}")
             return None
 
+    def try_perspective_crop(self, image):
+        """Perspektif duzeltme ile kimlik karti kirpma (egik cekilmis fotograflar icin)"""
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            
+            # Farkli threshold degerleriyle dene
+            for method in ['canny', 'adaptive']:
+                if method == 'canny':
+                    edges = cv2.Canny(blurred, 30, 100)
+                else:
+                    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                                   cv2.THRESH_BINARY_INV, 11, 2)
+                    edges = thresh
+                
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+                closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3)
+                
+                contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                contours = sorted(contours, key=cv2.contourArea, reverse=True)
+                
+                oh, ow = image.shape[:2]
+                min_area = ow * oh * 0.1
+                
+                for contour in contours[:10]:
+                    area = cv2.contourArea(contour)
+                    if area < min_area:
+                        continue
+                    
+                    peri = cv2.arcLength(contour, True)
+                    # Farkli epsilon degerleri dene
+                    for eps_mult in [0.02, 0.03, 0.04, 0.05]:
+                        approx = cv2.approxPolyDP(contour, eps_mult * peri, True)
+                        
+                        if len(approx) == 4:
+                            # 4 kose bulduk - perspektif duzeltme uygula
+                            pts = approx.reshape(4, 2).astype(np.float32)
+                            
+                            # Kosaleri sirala: sol-ust, sag-ust, sag-alt, sol-alt
+                            s = pts.sum(axis=1)
+                            d = np.diff(pts, axis=1)
+                            tl = pts[np.argmin(s)]
+                            br = pts[np.argmax(s)]
+                            tr = pts[np.argmin(d)]
+                            bl = pts[np.argmax(d)]
+                            
+                            src_pts = np.array([tl, tr, br, bl], dtype=np.float32)
+                            
+                            # Hedef boyutu hesapla
+                            w1 = np.linalg.norm(br - bl)
+                            w2 = np.linalg.norm(tr - tl)
+                            h1 = np.linalg.norm(tr - br)
+                            h2 = np.linalg.norm(tl - bl)
+                            max_w = int(max(w1, w2))
+                            max_h = int(max(h1, h2))
+                            
+                            if max_w < 50 or max_h < 50:
+                                continue
+                            
+                            # Oran kontrolu
+                            ratio = max_w / max_h if max_w > max_h else max_h / max_w
+                            if not (1.2 < ratio < 2.0):
+                                continue
+                            
+                            # Her zaman yatay cikti
+                            if max_w < max_h:
+                                max_w, max_h = max_h, max_w
+                                dst_pts = np.array([
+                                    [0, max_h], [0, 0], [max_w, 0], [max_w, max_h]
+                                ], dtype=np.float32)
+                            else:
+                                dst_pts = np.array([
+                                    [0, 0], [max_w, 0], [max_w, max_h], [0, max_h]
+                                ], dtype=np.float32)
+                            
+                            M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+                            warped = cv2.warpPerspective(image, M, (max_w, max_h))
+                            
+                            print(f"Perspektif duzeltme basarili: {max_w}x{max_h}, oran: {max_w/max_h:.2f}")
+                            return warped
+            
+            return None
+        except Exception as e:
+            print(f"Perspektif duzeltme hatasi: {str(e)}")
+            return None
+
     def smart_crop_with_aspect_ratio(self, image):
-        """Boy/en oranını koruyan akıllı kırpma"""
+        """Boy/en oranini koruyan akilli kirpma"""
         try:
             if not self.auto_crop_var.get():
                 return image
             
-            # Kimlik kartı sınırlarını algıla
+            # Yontem 1: Kontur tabanli algilama
             card_bounds = self.detect_id_card_with_aspect_ratio(image)
             
-            if card_bounds is None:
-                print("Kimlik kartı algılanamadı, merkezi kırpma uygulanıyor...")
-                return self.center_crop_with_ratio(image)
+            if card_bounds is not None:
+                x, y, w, h = card_bounds
+                
+                # Kenar boslugu ekle (kullanici ayarindan)
+                margin = int(self.margin_var.get())
+                
+                x_start = max(0, x - margin)
+                y_start = max(0, y - margin)
+                x_end = min(image.shape[1], x + w + margin)
+                y_end = min(image.shape[0], y + h + margin)
+                
+                cropped = image[y_start:y_end, x_start:x_end]
+                
+                # Dikey ise yataya cevir
+                crop_h, crop_w = cropped.shape[:2]
+                if crop_w < crop_h:
+                    print("Dikey goruntu algilandi, yatay konuma donduruluyor...")
+                    cropped = cv2.rotate(cropped, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                
+                print(f"Kimlik karti basariyla kirpildi:")
+                print(f"   Orijinal: {image.shape[1]}x{image.shape[0]}")
+                print(f"   Kirpilmis: {cropped.shape[1]}x{cropped.shape[0]}")
+                print(f"   Kenar boslugu: {margin}px")
+                return cropped
             
-            x, y, w, h = card_bounds
+            # Yontem 2: Perspektif duzeltme (egik cekilmis fotograflar)
+            print("Kontur tabanli algilama basarisiz, perspektif duzeltme deneniyor...")
+            perspective_result = self.try_perspective_crop(image)
+            if perspective_result is not None:
+                return perspective_result
             
-            # Kenar boşluğu ekle
-            margin = int(self.margin_var.get())
-            
-            # Sınırları genişlet (boy ve en için ayrı ayrı)
-            x_start = max(0, x - margin)
-            y_start = max(0, y - margin)
-            x_end = min(image.shape[1], x + w + margin)
-            y_end = min(image.shape[0], y + h + margin)
-            
-            # Kırp
-            cropped = image[y_start:y_end, x_start:x_end]
-            
-            # Eğer dikey (portrait) algılandıysa, yatay (landscape) konuma döndür
-            crop_h, crop_w = cropped.shape[:2]
-            if crop_w < crop_h:
-                print("Dikey görüntü algılandı, yatay konuma döndürülüyor...")
-                cropped = cv2.rotate(cropped, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            
-            print(f"Kimlik kartı başarıyla kırpıldı:")
-            print(f"   Orijinal: {image.shape[1]}x{image.shape[0]}")
-            print(f"   Kırpılmış: {cropped.shape[1]}x{cropped.shape[0]}")
-            print(f"   Konum: ({x_start},{y_start}) -> ({x_end},{y_end})")
-            
-            return cropped
+            # Yontem 3: Merkezi kirpma (son care)
+            print("Perspektif duzeltme de basarisiz, merkezi kirpma uygulanacak...")
+            return self.center_crop_with_ratio(image)
             
         except Exception as e:
-            print(f"Akıllı kırpma hatası: {str(e)}")
+            print(f"Akilli kirpma hatasi: {str(e)}")
             return self.center_crop_with_ratio(image)
 
     def center_crop_with_ratio(self, image):
@@ -571,15 +660,8 @@ class IDCardProcessor:
                 start_x = 0
                 start_y = (height - new_height) // 2
             
-            # %85'ini al (daha az agresif kırpma)
-            crop_factor = 0.85
-            final_width = int(new_width * crop_factor)
-            final_height = int(new_height * crop_factor)
-            
-            start_x += (new_width - final_width) // 2
-            start_y += (new_height - final_height) // 2
-            
-            cropped = image[start_y:start_y + final_height, start_x:start_x + final_width]
+            # Tam boyutta kirp (gereksiz alan kaybini onle)
+            cropped = image[start_y:start_y + new_height, start_x:start_x + new_width]
             
             print(f"Merkezi kırpma uygulandı:")
             print(f"   Orijinal: {width}x{height} (oran: {current_ratio:.2f})")
@@ -592,115 +674,102 @@ class IDCardProcessor:
             return image
 
     def enhance_image(self, image):
-        """Görüntü iyileştirme - renk bilgisini koruyarak"""
+        """Goruntu iyilestirme - siyah-beyaza cevirir ve kontrastini arttirir"""
         try:
+            # Renkli ise gri tonlamaya cevir
             if len(image.shape) == 3:
-                # Renkli goruntu: LAB renk uzayina cevir, sadece L kanalini iyilestir
-                lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-                l_channel, a_channel, b_channel = cv2.split(lab)
-                
-                # L kanalina gurultu azaltma
-                l_denoised = cv2.fastNlMeansDenoising(l_channel, None, h=10, templateWindowSize=7, searchWindowSize=21)
-                
-                # Kontrast iyilestirme (sadece L kanali)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                l_enhanced = clahe.apply(l_denoised)
-                
-                # Hafif keskinlestirme
-                kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]]) / 1.0
-                l_sharpened = cv2.filter2D(l_enhanced, -1, kernel)
-                l_result = cv2.addWeighted(l_enhanced, 0.8, l_sharpened, 0.2, 0)
-                
-                # Kanallari birlestir ve BGR'ye geri dondur
-                merged = cv2.merge([l_result, a_channel, b_channel])
-                result = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             else:
-                # Gri tonlamali goruntu
-                denoised = cv2.fastNlMeansDenoising(image, None, h=10, templateWindowSize=7, searchWindowSize=21)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                enhanced = clahe.apply(denoised)
+                gray = image.copy()
+            
+            # Kalite ayarina gore isleme siddeti belirle
+            quality = int(self.quality_var.get())
+            
+            # Gurultu azaltma (kalite yuksekse daha agresif)
+            denoise_h = max(3, min(15, int(quality / 8)))
+            denoised = cv2.fastNlMeansDenoising(gray, None, h=denoise_h, templateWindowSize=7, searchWindowSize=21)
+            
+            # Kontrast iyilestirme - CLAHE
+            clip_limit = 1.5 + (quality / 100.0) * 1.5  # 1.5 ile 3.0 arasi
+            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+            enhanced = clahe.apply(denoised)
+            
+            # Keskinlestirme (kalite yuksekse daha fazla)
+            if quality > 30:
+                sharpen_amount = 0.1 + (quality / 100.0) * 0.3  # 0.1 ile 0.4 arasi
                 kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]]) / 1.0
                 sharpened = cv2.filter2D(enhanced, -1, kernel)
-                result = cv2.addWeighted(enhanced, 0.8, sharpened, 0.2, 0)
+                result = cv2.addWeighted(enhanced, 1.0 - sharpen_amount, sharpened, sharpen_amount, 0)
+            else:
+                result = enhanced
             
+            print(f"Goruntu siyah-beyaza cevrildi (kalite: {quality}%, denoise: {denoise_h}, clip: {clip_limit:.1f})")
             return result
             
         except Exception as e:
-            print(f"Görüntü iyileştirme hatası: {str(e)}")
+            print(f"Goruntu iyilestirme hatasi: {str(e)}")
+            if len(image.shape) == 3:
+                return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             return image
 
     def process_image(self, image_path, output_suffix):
+        """Goruntuleri isle ve gecici dosya olarak kaydet (PDF icin)"""
         try:
-            # Görüntüyü yükle
+            # Goruntuyu yukle
             image = cv2.imread(image_path)
             if image is None:
-                raise ValueError("Görüntü yüklenemedi")
+                raise ValueError("Goruntu yuklenemedi")
             
             print(f"\n{'='*50}")
-            print(f"İşleniyor: {output_suffix}")
-            print(f"Orijinal görüntü boyutu: {image.shape[1]}x{image.shape[0]}")
+            print(f"Isleniyor: {output_suffix}")
+            print(f"Orijinal goruntu boyutu: {image.shape[1]}x{image.shape[0]}")
             
-            # Akıllı kimlik kartı kırpma
+            # Akilli kimlik karti kirpma
             if self.auto_crop_var.get():
-                self.update_status(30, "TC kimlik kartı algılanıyor (boy/en oranı korunuyor)...")
+                self.update_status(30, "TC kimlik karti algilaniyor...")
                 cropped_image = self.smart_crop_with_aspect_ratio(image)
-                print(f"İşlenmiş görüntü boyutu: {cropped_image.shape[1]}x{cropped_image.shape[0]}")
+                print(f"Islenmis goruntu boyutu: {cropped_image.shape[1]}x{cropped_image.shape[0]}")
             else:
                 cropped_image = image
-                print("Otomatik kırpma kapalı")
+                # Kirpma kapali olsa bile dikey ise yataya cevir
+                ch, cw = cropped_image.shape[:2]
+                if cw < ch:
+                    print("Kirpma kapali ama dikey goruntu, yataya cevriliyor...")
+                    cropped_image = cv2.rotate(cropped_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                print("Otomatik kirpma kapali")
             
-            # Görüntü iyileştirme
-            self.update_status(60, "Görüntü iyileştiriliyor...")
+            # Goruntu iyilestirme (siyah-beyaza cevirme dahil)
+            self.update_status(60, "Goruntu isleniyor (S/B)...")
             enhanced = self.enhance_image(cropped_image)
             
             # Son kontrol: dikey ise yataya cevir (her durumda yatay kaydet)
-            eh, ew = enhanced.shape[:2]
+            if len(enhanced.shape) == 2:
+                eh, ew = enhanced.shape
+            else:
+                eh, ew = enhanced.shape[:2]
             if ew < eh:
                 print("Kayit oncesi dikey goruntu tespit edildi, yataya cevriliyor...")
                 enhanced = cv2.rotate(enhanced, cv2.ROTATE_90_COUNTERCLOCKWISE)
             
-            # Çıktı dosya yolunu oluştur
+            # Gecici dosya olarak kaydet (PDF olusturmak icin)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_filename = f"kimlik_{output_suffix}_{timestamp}.jpg"
-            output_path = os.path.join(self.output_dir, output_filename)
+            temp_filename = f"_temp_kimlik_{output_suffix}_{timestamp}.png"
+            temp_path = os.path.join(self.temp_dir, temp_filename)
             
-            # Klasörün var olduğundan emin ol
-            os.makedirs(self.output_dir, exist_ok=True)
+            os.makedirs(self.temp_dir, exist_ok=True)
             
-            # Görüntüyü kaydet
-            quality = int(self.quality_var.get())
-            # Eğer kalite 0 ise, sıkıştırma yapmadan kaydedin veya özel bir işlem yapın.
-            # JPEG kalitesi 0-100 arasında olmalıdır. Eğer 0 verilirse, bazı kütüphaneler hata verebilir.
-            # Bu durumda, 0'ı özel bir "kalite yok" durumu olarak ele alabiliriz.
-            if quality == 0:
-                # Kalite 0 ise, daha az sıkıştırmalı veya sıkıştırmasız bir format düşünebiliriz.
-                # Ancak JPEG için 0, genellikle en düşük kalite anlamına gelir.
-                # Eğer kullanıcı "kapalı" derken hiç işlem yapılmamasını kastediyorsa,
-                # bu kısmı daha farklı ele almak gerekebilir.
-                # Şimdilik, 0'ı doğrudan JPEG kalitesi olarak kullanmaya devam edelim.
-                # OpenCV'nin imwrite fonksiyonu 0 kalitesini kabul eder.
-                success = cv2.imwrite(output_path, enhanced, [int(cv2.IMWRITE_JPEG_QUALITY), 0])
-            else:
-                success = cv2.imwrite(output_path, enhanced, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            # PNG olarak kaydet (kayipsiz, gecici dosya)
+            success = cv2.imwrite(temp_path, enhanced)
             
-            if not success:
-                raise ValueError(f"Görüntü kaydedilemedi: {output_path}")
+            if not success or not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                raise ValueError(f"Gecici dosya olusturulamadi: {temp_path}")
             
-            # Kaydedilen dosyayı kontrol et
-            if not os.path.exists(output_path):
-                raise ValueError(f"Dosya oluşturulamadı: {output_path}")
-            
-            # Dosya boyutunu kontrol et
-            file_size = os.path.getsize(output_path)
-            if file_size == 0:
-                raise ValueError(f"Boş dosya oluşturuldu: {output_path}")
-            
-            print(f"✓ Başarıyla kaydedildi: {output_filename}")
+            print(f"Gecici dosya olusturuldu: {temp_filename} ({os.path.getsize(temp_path)} byte)")
             print(f"{'='*50}\n")
             
-            return output_path
+            return temp_path
         except Exception as e:
-            raise Exception(f"İşlem sırasında hata oluştu: {str(e)}")
+            raise Exception(f"Islem sirasinda hata olustu: {str(e)}")
 
     def start_processing(self):
         # İşlemi ayrı bir thread'de başlat
@@ -801,57 +870,69 @@ class IDCardProcessor:
             raise Exception(f"PDF olusturulamadi: {str(e)}")
 
     def _run_processing(self):
+        temp_files = []
         try:
             self.progress_var.set(0)
-            self.update_status(10, "İşlem başlatılıyor...")
+            self.update_status(10, "Islem baslatiliyor...")
             
-            # Çıktı klasörünü oluştur
+            # Cikti klasorunu olustur
             os.makedirs(self.output_dir, exist_ok=True)
             
-            processed_files = []
-            
             if self.front_image_path:
-                self.update_status(20, "Ön yüz işleniyor...")
-                output_path = self.process_image(self.front_image_path, "on")
-                processed_files.append(output_path)
+                self.update_status(20, "On yuz isleniyor...")
+                temp_path = self.process_image(self.front_image_path, "on")
+                temp_files.append(temp_path)
                 self.progress_var.set(40)
             
             if self.back_image_path:
-                self.update_status(50, "Arka yüz işleniyor...")
-                output_path = self.process_image(self.back_image_path, "arka")
-                processed_files.append(output_path)
+                self.update_status(50, "Arka yuz isleniyor...")
+                temp_path = self.process_image(self.back_image_path, "arka")
+                temp_files.append(temp_path)
                 self.progress_var.set(70)
             
-            # PDF oluştur (en az 1 görüntü varsa)
+            # PDF olustur (en az 1 goruntu varsa)
             pdf_path = None
-            if processed_files:
-                self.update_status(80, "PDF oluşturuluyor...")
-                pdf_path = self.create_combined_pdf(processed_files)
+            if temp_files:
+                self.update_status(80, "PDF olusturuluyor...")
+                pdf_path = self.create_combined_pdf(temp_files)
                 self.progress_var.set(95)
             
-            self.update_status(100, "İşlem tamamlandı!")
+            # Gecici dosyalari sil
+            for tf in temp_files:
+                try:
+                    if os.path.exists(tf):
+                        os.remove(tf)
+                        print(f"Gecici dosya silindi: {tf}")
+                except Exception:
+                    pass
             
-            # Sonuçları göster
-            result_message = f"İşlem başarıyla tamamlandı!\n\n"
-            result_message += f"Kaydedilen dosyalar ({len(processed_files)} JPG + 1 PDF):\n"
-            for file_path in processed_files:
-                file_size = os.path.getsize(file_path) / 1024  # KB cinsinden
-                result_message += f"  {os.path.basename(file_path)} ({file_size:.1f} KB)\n"
+            self.update_status(100, "Islem tamamlandi!")
+            
+            # Sonuclari goster
             if pdf_path:
                 pdf_size = os.path.getsize(pdf_path) / 1024
-                result_message += f"\nPDF (iki yüz birleşik):\n"
+                yuz_sayisi = len(temp_files)
+                result_message = f"Islem basariyla tamamlandi!\n\n"
+                result_message += f"PDF dosyasi ({yuz_sayisi} yuz birlesik):\n"
                 result_message += f"  {os.path.basename(pdf_path)} ({pdf_size:.1f} KB)\n"
-            result_message += f"\nKlasör: {self.output_dir}"
+                result_message += f"\nKlasor: {self.output_dir}"
+                
+                messagebox.showinfo("Basarili", result_message)
             
-            messagebox.showinfo("Başarılı", result_message)
             self.progress_var.set(0)
             
         except Exception as e:
-            messagebox.showerror("İşlem Hatası", str(e))
+            # Hata durumunda da gecici dosyalari temizle
+            for tf in temp_files:
+                try:
+                    if os.path.exists(tf):
+                        os.remove(tf)
+                except Exception:
+                    pass
+            messagebox.showerror("Islem Hatasi", str(e))
             self.update_status(0, f"Hata: {str(e)}")
             self.progress_var.set(0)
         finally:
-            # İşlem bitince butonları tekrar etkinleştir
             self.toggle_buttons_state("normal")
 
 
@@ -879,19 +960,57 @@ class IDCardProcessor:
                 return
             
             system = platform.system()
+            pdf_path = os.path.normpath(self.last_pdf_path)
             
             if system == 'Windows':
-                # Windows: os.startfile ile 'print' komutu
-                os.startfile(self.last_pdf_path, 'print')
-                print(f"Yazdirma komutu gonderildi: {self.last_pdf_path}")
+                try:
+                    # Yontem 1: Sumatra PDF ile sessiz yazdirma (yukluyse)
+                    sumatra_paths = [
+                        os.path.join(os.getenv('LOCALAPPDATA', ''), 'SumatraPDF', 'SumatraPDF.exe'),
+                        os.path.join(os.getenv('PROGRAMFILES', ''), 'SumatraPDF', 'SumatraPDF.exe'),
+                        os.path.join(os.getenv('PROGRAMFILES(X86)', ''), 'SumatraPDF', 'SumatraPDF.exe'),
+                    ]
+                    sumatra_found = None
+                    for sp in sumatra_paths:
+                        if sp and os.path.exists(sp):
+                            sumatra_found = sp
+                            break
+                    
+                    if sumatra_found:
+                        subprocess.Popen([sumatra_found, '-print-to-default', '-silent', pdf_path])
+                        print(f"SumatraPDF ile yazdirma komutu gonderildi: {pdf_path}")
+                        self.update_status(0, "PDF yaziciya gonderildi (SumatraPDF)")
+                        return
+                except Exception:
+                    pass
+                
+                try:
+                    # Yontem 2: PowerShell ile yazdirma
+                    ps_cmd = f'Start-Process -FilePath "{pdf_path}" -Verb Print'
+                    subprocess.Popen(['powershell', '-Command', ps_cmd], 
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                    print(f"PowerShell ile yazdirma komutu gonderildi: {pdf_path}")
+                    self.update_status(0, "PDF yaziciya gonderildi")
+                    return
+                except Exception as e2:
+                    print(f"PowerShell yazdirma basarisiz: {e2}")
+                
+                try:
+                    # Yontem 3: Varsayilan uygulama ile ac (kullanici oradan yazdirir)
+                    os.startfile(pdf_path)
+                    self.update_status(0, "PDF acildi - Ctrl+P ile yazdiriniz")
+                    messagebox.showinfo("Bilgi", 
+                        "PDF dosyasi acildi.\n\nYazdirmak icin Ctrl+P tusuna basabilirsiniz.")
+                    return
+                except Exception as e3:
+                    raise Exception(f"PDF acilamadi: {e3}")
+                    
             elif system == 'Darwin':
-                # macOS: lpr komutu
-                subprocess.run(['lpr', self.last_pdf_path], check=True)
-                print(f"Yazdirma komutu gonderildi (macOS): {self.last_pdf_path}")
+                subprocess.run(['lpr', pdf_path], check=True)
+                print(f"Yazdirma komutu gonderildi (macOS): {pdf_path}")
             else:
-                # Linux: lpr komutu
-                subprocess.run(['lpr', self.last_pdf_path], check=True)
-                print(f"Yazdirma komutu gonderildi (Linux): {self.last_pdf_path}")
+                subprocess.run(['lpr', pdf_path], check=True)
+                print(f"Yazdirma komutu gonderildi (Linux): {pdf_path}")
             
             self.update_status(0, "PDF yaziciya gonderildi")
                 
